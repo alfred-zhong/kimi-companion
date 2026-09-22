@@ -128,8 +128,10 @@ public enum SelfCheck {
         check("Duration.5d3h", BalanceFormatter.formatDuration(5 * 86_400 + 3 * 3600) == "5d3h")
         check("Duration.26d", BalanceFormatter.formatDuration(26 * 86_400) == "26d")
 
-        // MARK: - ProviderID 路由
+        // MARK: - ProviderID（default_model 前缀推导 + 段名 / logo 查表路由）
 
+        // `fromModelPrefix` 现在唯一的调用方是 `fromDefaultModel`（首启菜单栏 provider 推导）；
+        // 用量已不再按 `model` 前缀归属（ADR-0006），这里覆盖的是推导路径本身。
         check("Provider.deepseek.verbatim", ProviderID.fromModelPrefix("DeepSeek") == .deepseek)
         check("Provider.openCodeGo.verbatim", ProviderID.fromModelPrefix("OpenCode Go") == .opencodeGo)
         check("Provider.openCodeGo.rawValue", ProviderID.fromModelPrefix("opencode-go") == .opencodeGo)
@@ -522,18 +524,25 @@ public enum SelfCheck {
             let ev = p.parse(line: line, relPath: "w/s/agents/main/wire.jsonl", lineOffset: 128)
             check("Wire.parsed", ev != nil)
             check("Wire.tsMs", ev?.tsMs == 1790065336874)
-            check("Wire.provider", ev?.provider == .deepseek)
             check("Wire.inputOther", ev?.inputOther == 18_938)
             check("Wire.output", ev?.output == 187)
             check("Wire.cacheRead", ev?.cacheRead == 145_024)
             check("Wire.cacheCreation", ev?.cacheCreation == 0)
             check("Wire.dedupeKey", ev?.dedupeKey == "w/s/agents/main/wire.jsonl:128")
 
+            // `model` 不参与解析：另一个前缀的记录产出形状完全相同的 UsageEvent（只有时间与计数）。
             let ocLine = #"{"type":"usage.record","agentId":"agent-3","model":"OpenCode Go/deepseek-v4.1-flash","usage":{"inputOther":1057,"output":279,"inputCacheRead":164224,"inputCacheCreation":0},"usageScope":"turn","time":1790069954636}"#
-            check("Wire.providerWithSpace", p.parse(line: ocLine, relPath: "a", lineOffset: 0)?.provider == .opencodeGo)
+            let ocEvent = p.parse(line: ocLine, relPath: "a", lineOffset: 0)
+            check("Wire.otherPrefixParsed", ocEvent?.inputOther == 1_057 && ocEvent?.cacheRead == 164_224)
 
+            // 未匹配任何受支持 provider 的 `model` 前缀照常计数（没有任何东西被丢弃）。
             let unknownLoad = #"{"type":"usage.record","agentId":"main","model":"zenmux/foo","usage":{"inputOther":1,"output":1,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1}"#
-            check("Wire.unmatchedProvider", p.parse(line: unknownLoad, relPath: "a", lineOffset: 0)?.provider == .unknown)
+            check("Wire.unmatchedPrefixCounted",
+                  p.parse(line: unknownLoad, relPath: "a", lineOffset: 0)?.stats == TokenStats(inputTokens: 1, outputTokens: 1))
+            // 连 `model` 字段都没有也是一条合法记录（parser 不再读它）。
+            let noModel = #"{"type":"usage.record","agentId":"main","usage":{"inputOther":4,"output":2,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":9}"#
+            check("Wire.noModelFieldStillParsed",
+                  p.parse(line: noModel, relPath: "a", lineOffset: 0)?.stats == TokenStats(inputTokens: 4, outputTokens: 2))
 
             // 非 usage.record 一律不计（含 metadata / llm.request / agent.message.appended / token_counting.measured）。
             let metadata = #"{"type":"metadata","protocol_version":"1.5","created_at":1790069942091}"#
@@ -555,50 +564,57 @@ public enum SelfCheck {
             check("Wire.stats.mapping", ev?.stats == TokenStats(inputTokens: 18_938, outputTokens: 187, cacheCreationTokens: 0, cacheReadTokens: 145_024))
         }
 
-        // MARK: - HourlyAggregator（桶边界 + 归属）
+        // MARK: - HourlyAggregator（桶边界 + 合并口径）
 
         do {
             let nowMs: Int64 = 24 * HOUR_MS
             let todayStartMs: Int64 = 0
-            func event(_ id: String, _ provider: ProviderID, _ tsMs: Int64, input: Int = 10, output: Int = 1, cacheRead: Int = 0, cacheCreation: Int = 0) -> UsageEvent {
-                UsageEvent(tsMs: tsMs, provider: provider, inputOther: input, output: output,
+            func event(_ id: String, _ tsMs: Int64, input: Int = 10, output: Int = 1, cacheRead: Int = 0, cacheCreation: Int = 0) -> UsageEvent {
+                UsageEvent(tsMs: tsMs, inputOther: input, output: output,
                            cacheRead: cacheRead, cacheCreation: cacheCreation, dedupeKey: id)
             }
             let events: [UsageEvent] = [
-                event("a", .deepseek, nowMs - HOUR_MS / 2, input: 5),
-                event("b", .deepseek, nowMs - 6 * HOUR_MS, input: 10),
-                event("c", .opencodeGo, nowMs - 14 * HOUR_MS, input: 100),
-                event("d", .deepseek, -HOUR_MS, input: 999),
-                event("e", .unknown, nowMs - HOUR_MS / 2, input: 7),
+                event("a", nowMs - HOUR_MS / 2, input: 5),
+                event("b", nowMs - 6 * HOUR_MS, input: 10),
+                event("c", nowMs - 14 * HOUR_MS, input: 100),
+                event("d", -HOUR_MS, input: 999),
+                event("e", nowMs - HOUR_MS / 2, input: 7),
+                event("f", nowMs - 4 * HOUR_MS, input: 3),
             ]
             let snap = HourlyAggregator().aggregate(events: events, nowMs: nowMs, todayStartMs: todayStartMs)
 
-            check("Agg.groups.count", snap.groups.count == 3)
-            check("Agg.groups.order", snap.groups.map(\.provider) == [.deepseek, .opencodeGo, .unknown])
-            check("Agg.groupBuckets.count", snap.group(for: .deepseek).hourly.count == HOUR_BUCKET_COUNT)
-            // a=5（半小时前，算今日 + 末桶）, b=10（6h 前，算今日 + 桶 5）; c=100 在 14h 前 → 14h 前相对 now=24h 仍是 today
-            check("Agg.today.deepseek", snap.group(for: .deepseek).today.inputTokens == 15)
-            check("Agg.today.opencode", snap.group(for: .opencodeGo).today.inputTokens == 100)
-            check("Agg.today.unmatched", snap.unmatched.today.inputTokens == 7)
-            check("Agg.droppedBeforeToday", snap.group(for: .deepseek).today.inputTokens != 1_014)
-            // 桶：30min 前 → hoursAgo=0.5 → idx = 12-1-0 = 11；6h 前 → idx = 12-1-6 = 5；14h 前 → 不入 12 桶
-            check("Agg.bucket11", snap.group(for: .deepseek).hourly[11].stats.inputTokens == 5)
-            check("Agg.bucket5", snap.group(for: .deepseek).hourly[5].stats.inputTokens == 10)
-            check("Agg.bucket.outOfWindow", snap.group(for: .opencodeGo).hourly.allSatisfy { $0.stats.inputTokens == 0 })
-            check("Agg.unmatched.attributedToUnknown", snap.unmatched.hourly[11].stats.inputTokens == 7)
-            // last5h = 后 5 桶（idx 7..11）
-            check("Agg.last5h", snap.group(for: .deepseek).last5h.inputTokens == 5)
-            check("Agg.last5h.excludesOlder", snap.group(for: .deepseek).hourly[0].stats.inputTokens == 0)
+            check("Agg.buckets.count", snap.hourly.count == HOUR_BUCKET_COUNT)
+            // 合并口径：a+b+c+e+f = 125 全部并入同一份合计；d 在今日零点之前，不计。
+            check("Agg.today.combined", snap.today.inputTokens == 125)
+            check("Agg.droppedBeforeToday", snap.today.inputTokens != 1_124)
+            // 桶：30min 前 → hoursAgo=0.5 → idx = 12-1-0 = 11；6h 前 → idx 5；4h 前 → idx 7；14h 前 → 不入 12 桶
+            check("Agg.bucket11", snap.hourly[11].stats.inputTokens == 12)
+            check("Agg.bucket7", snap.hourly[7].stats.inputTokens == 3)
+            check("Agg.bucket5", snap.hourly[5].stats.inputTokens == 10)
+            check("Agg.bucket.outOfWindow", snap.hourly[0].stats.inputTokens == 0)
+            check("Agg.bucket.allEventsKept", snap.hourly.reduce(0) { $0 + $1.stats.inputTokens } == 25)
+            // last5h = 后 5 桶（idx 7..11）= 3 + 12 = 15；idx 5 的 10 不在其中。
+            check("Agg.last5h", snap.last5h.inputTokens == 15)
+            check("Agg.last5h.excludesOlder", snap.hourly[5].stats.inputTokens == 10 && snap.last5h.inputTokens != 25)
+            var union = TokenStats()
+            for bucket in snap.hourly.suffix(5) { union += bucket.stats }
+            check("Agg.last5h.equalsUnionOfLast5Buckets", snap.last5h == union && union.inputTokens == 15)
+
+            // 桶结构不变量：12 桶、步长 1h、索引 0 最旧 / 末位最新、左开右闭、末桶是完整一小时。
+            check("Agg.bucket.endMsAxis",
+                  snap.hourly.map(\.endMs) == (0..<HOUR_BUCKET_COUNT).map { nowMs - Int64(HOUR_BUCKET_COUNT - 1 - $0) * HOUR_MS })
+            check("Agg.bucket.eachSpansOneHour", snap.hourly.allSatisfy { $0.endMs - $0.startMs == HOUR_MS })
+            check("Agg.bucket.lastIsCompleteHourEndingNow", snap.hourly[HOUR_BUCKET_COUNT - 1].endMs == nowMs)
 
             // 桶区间左开右闭。
             let edge: [UsageEvent] = [
-                event("at-now", .deepseek, nowMs, input: 1),
-                event("exactly-1h", .deepseek, nowMs - HOUR_MS, input: 2),
-                event("just-inside-left", .deepseek, nowMs - 11 * HOUR_MS - 1, input: 4),
-                event("exactly-12h", .deepseek, nowMs - 12 * HOUR_MS, input: 8),
+                event("at-now", nowMs, input: 1),
+                event("exactly-1h", nowMs - HOUR_MS, input: 2),
+                event("just-inside-left", nowMs - 11 * HOUR_MS - 1, input: 4),
+                event("exactly-12h", nowMs - 12 * HOUR_MS, input: 8),
             ]
             let edgeSnap = HourlyAggregator().aggregate(events: edge, nowMs: nowMs, todayStartMs: todayStartMs)
-            let hours = edgeSnap.group(for: .deepseek).hourly
+            let hours = edgeSnap.hourly
             check("Agg.boundary.nowInLastBucket", hours[11].stats.inputTokens == 1)
             check("Agg.boundary.exactly1hInBucket10", hours[10].stats.inputTokens == 2)
             check("Agg.boundary.justInsideInBucket0", hours[0].stats.inputTokens == 4)
@@ -610,9 +626,9 @@ public enum SelfCheck {
 
             // 空事件：结构完整、全零。
             let emptySnap = HourlyAggregator().aggregate(events: [], nowMs: nowMs, todayStartMs: todayStartMs)
-            check("Agg.empty.structure", emptySnap.groups.count == 3 && emptySnap.group(for: .deepseek).hourly.count == HOUR_BUCKET_COUNT)
-            check("Agg.empty.zeroed", emptySnap.group(for: .opencodeGo).today.isEmpty)
-            check("Agg.group(for:absent)ReturnsZero", emptySnap.group(for: .deepseek).today.isEmpty)
+            check("Agg.empty.structure", emptySnap.hourly.count == HOUR_BUCKET_COUNT)
+            check("Agg.empty.zeroed", emptySnap.today.isEmpty && emptySnap.last5h.isEmpty
+                && emptySnap.hourly.allSatisfy { $0.stats.isEmpty })
         }
 
         // MARK: - WireLogReader：增量契约 == 全量重扫
@@ -661,7 +677,10 @@ public enum SelfCheck {
             let first = reader.events(now: now)
             check("Reader.initialCount", first.count == 3)
             check("Reader.initialParity", keys(first) == oracle("incremental"))
-            check("Reader.multiAgentAttribution", Set(first.map(\.provider)) == [.deepseek, .opencodeGo])
+            // 每个 agent 的文件都必须被读到（跨文件零重复；只读 main 会严重漏计）。
+            check("Reader.multiAgentFiles",
+                  first.contains { $0.dedupeKey.hasPrefix("wd_x_aaaaaaaaaaaa/session_1/agents/agent-3/wire.jsonl:") }
+                  && first.contains { $0.dedupeKey.hasPrefix("wd_x_aaaaaaaaaaaa/session_1/agents/main/wire.jsonl:") })
 
             // 增量：第二次读取是「窗口内全量」而不是「本轮新增」，且与全量结果一致。
             append("incremental/wd_x_aaaaaaaaaaaa/session_1/agents/main/wire.jsonl",
@@ -711,7 +730,7 @@ public enum SelfCheck {
             let rolling = WireLogReader(sessionsRoot: root.appendingPathComponent("window").path)
             let windowed = rolling.events(now: now)
             check("Reader.windowEviction", windowed.count == 1)
-            check("Reader.windowEviction.content", windowed.first?.output == 200 && windowed.first?.provider == .opencodeGo)
+            check("Reader.windowEviction.content", windowed.first?.output == 200)
             check("Reader.windowParity", keys(windowed) == oracle("window"))
             let earlier = Date(timeIntervalSince1970: TimeInterval(nowMs - HOUR_MS) / 1000)
             let rolledBack = rolling.events(now: earlier)
@@ -747,10 +766,14 @@ public enum SelfCheck {
             let (snap, err) = sync { await source.capture(now: now) }
             check("DailySource.noError", err == nil)
             check("DailySource.snapshot", snap != nil)
-            check("DailySource.deepseek", snap?.group(for: .deepseek).today == TokenStats(inputTokens: 10, outputTokens: 5, cacheReadTokens: 90))
-            check("DailySource.opencode", snap?.group(for: .opencodeGo).today == TokenStats(inputTokens: 20, outputTokens: 7))
-            check("DailySource.unmatched", snap?.unmatched.today == TokenStats(inputTokens: 3, outputTokens: 1))
-            check("DailySource.hitRate", abs((snap?.group(for: .deepseek).today.cacheHitRate ?? 0) - 0.9) < 1e-9)
+            // 三条记录各带不同的 `model` 前缀（DeepSeek / OpenCode Go / 不匹配任何 Provider 的 agent-loop），
+            // 全部并入同一份合计：input 10+20+3 = 33，output 5+7+1 = 13，cacheRead 90。
+            check("DailySource.combined",
+                  snap?.today == TokenStats(inputTokens: 33, outputTokens: 13, cacheReadTokens: 90))
+            check("DailySource.combined.bothKnownPrefixesCounted", snap?.today.inputTokens == 10 + 20 + 3)
+            check("DailySource.combined.unmatchedPrefixNotDropped", snap?.today.inputTokens != 10 + 20)
+            check("DailySource.combined.notSinglePrefix", snap?.today.inputTokens != 20 + 3)
+            check("DailySource.hitRate", abs((snap?.today.cacheHitRate ?? 0) - 90.0 / 123.0) < 1e-9)
         }
 
         // MARK: - Caffeinate / Countdown
@@ -930,17 +953,16 @@ public enum SelfCheck {
                 QuotaWindow(id: "monthly", label: "月度", usedPercent: 13, status: "ok", resetsAt: now.addingTimeInterval(26 * 86_400)),
             ]
             let ocOK = BalanceResult(provider: .opencodeGo, balance: 16, currency: .percent, usedPercent: 16, quotaWindows: windows)
-            let daily = DailyUsageSnapshot(groups: [
-                UsageGroup(provider: .deepseek,
-                           today: TokenStats(inputTokens: 18_938, outputTokens: 187, cacheReadTokens: 145_024),
-                           hourly: (0..<HOUR_BUCKET_COUNT).map { _ in HourBucket(startMs: 0, endMs: 0) }),
-                UsageGroup(provider: .opencodeGo,
-                           today: TokenStats(inputTokens: 1_000, outputTokens: 20, cacheReadTokens: 4_000),
-                           hourly: (0..<HOUR_BUCKET_COUNT).map { _ in HourBucket(startMs: 0, endMs: 0) }),
-                UsageGroup(provider: .unknown,
-                           today: TokenStats(inputTokens: 5, outputTokens: 2, cacheReadTokens: 0),
-                           hourly: (0..<HOUR_BUCKET_COUNT).map { _ in HourBucket(startMs: 0, endMs: 0) }),
-            ], capturedAt: now)
+            // 用量只有合并的一份：today 与「后 5 桶」刻意给不同值，好把两行区分开。
+            let lastBucketStats = TokenStats(inputTokens: 1_000, outputTokens: 20, cacheReadTokens: 4_000)
+            let daily = DailyUsageSnapshot(
+                today: TokenStats(inputTokens: 18_938, outputTokens: 187, cacheReadTokens: 145_024),
+                hourly: (0..<HOUR_BUCKET_COUNT).map { index in
+                    HourBucket(startMs: 0, endMs: 0,
+                               stats: index == HOUR_BUCKET_COUNT - 1 ? lastBucketStats : TokenStats())
+                },
+                capturedAt: now
+            )
 
             let inputs = StatusBarPresenter.Inputs(
                 selectedProvider: .deepseek,
@@ -974,22 +996,37 @@ public enum SelfCheck {
                 "3h15m 后重置", "5d3h 后重置", "26d 后重置",
             ])
 
-            // 各自 provider 的用量行（按 model 前缀归属）。
-            check("Menu.usage.deepseekToday",
-                  titles.contains("今日 · ↑18.9K · ↓187 · ⚡145.0K · 🎯88%"))
-            check("Menu.usage.deepseek5h", titles.contains("近5h · ↑0 · ↓0 · ⚡0 · 🎯0%"))
-            check("Menu.usage.opencodeToday", titles.contains("今日 · ↑1.0K · ↓20 · ⚡4.0K · 🎯80%"))
-            check("Menu.usage.unmatchedRow", titles.contains("其他 · ↑5 · ↓2 · ⚡0 · 🎯0%"))
-            check("Menu.usage.unmatchedIsTrailing",
-                  (titles.firstIndex(of: "其他 · ↑5 · ↓2 · ⚡0 · 🎯0%") ?? 0) > (titles.firstIndex(of: "OpenCode Go") ?? 0))
-            // 无未匹配用量时不显示「其他」行。
-            let noUnmatched = DailyUsageSnapshot(groups: [
-                UsageGroup(provider: .deepseek, today: TokenStats(inputTokens: 1), hourly: []),
-                UsageGroup(provider: .opencodeGo, today: TokenStats(), hourly: []),
-                UsageGroup(provider: .unknown, today: TokenStats(), hourly: []),
-            ], capturedAt: now)
-            check("Menu.usage.noUnmatchedRow",
-                  !StatusBarPresenter.renderMenu(.init(daily: noUnmatched), now: now).map(\.title).contains { $0.hasPrefix("其他") })
+            // 用量：只有一份合并块，位于两个 provider section 之后、「菜单栏显示」之前。
+            let todayRow = "今日 · ↑18.9K · ↓187 · ⚡145.0K · 🎯88%"
+            let last5hRow = "近 5h · ↑1.0K · ↓20 · ⚡4.0K · 🎯80%"
+            check("Menu.usage.todayRow", titles.contains(todayRow))
+            check("Menu.usage.last5hRow", titles.contains(last5hRow))
+            check("Menu.usage.exactlyOneTodayRow", titles.filter { $0.hasPrefix("今日") }.count == 1)
+            check("Menu.usage.exactlyOneLast5hRow", titles.filter { $0.hasPrefix("近 5h") }.count == 1)
+            // provider section 里不再有各自的用量行：全菜单只有这两行用量。
+            check("Menu.usage.noPerProviderUsage",
+                  titles.filter { $0.hasPrefix("今日") || $0.hasPrefix("近 5h") }.count == 2)
+            // 「其他」行彻底消失（已经没有「未匹配」这个概念）。
+            check("Menu.usage.noOtherRow", !titles.contains { $0.contains("其他") })
+            check("Menu.usage.noUnmatchedBucketRow", !titles.contains { $0.hasPrefix("其他 ·") })
+            if let todayIdx = titles.firstIndex(of: todayRow),
+               let ocIdx = titles.firstIndex(of: "OpenCode Go"),
+               let barIdx = titles.firstIndex(of: "菜单栏显示") {
+                check("Menu.usage.afterBothProviderSections", todayIdx > ocIdx)
+                check("Menu.usage.beforeMenuBarSelection", todayIdx < barIdx)
+                check("Menu.usage.last5hDirectlyAfterToday", titles[todayIdx + 1] == last5hRow)
+                // 用量块之后再没有进度条行 —— 用量行确实脱离了 provider section。
+                check("Menu.usage.noBarsAfterUsageBlock", items[todayIdx...].allSatisfy { $0.usageBar == nil })
+            } else {
+                check("Menu.usage.blockLocated", false)
+            }
+
+            // 空用量也照常渲染一份合并块（全零），不会因为「没有归属」而消失。
+            let emptyDaily = DailyUsageSnapshot(today: TokenStats(), hourly: [], capturedAt: now)
+            let emptyTitles = StatusBarPresenter.renderMenu(.init(daily: emptyDaily), now: now).map(\.title)
+            check("Menu.usage.emptyStillRendersCombined",
+                  emptyTitles.contains("今日 · ↑0 · ↓0 · ⚡0 · 🎯0%")
+                  && emptyTitles.contains("近 5h · ↑0 · ↓0 · ⚡0 · 🎯0%"))
 
             // is_available: false → 仍展示金额，并追加 ⚠。
             let unavailable = BalanceResult(provider: .deepseek, balance: 65.92, currency: .cny, isAvailable: false)
@@ -1113,11 +1150,11 @@ public enum SelfCheck {
         // MARK: - RefreshController：tick 驱动的状态迁移
 
         do {
-            let daily = DailyUsageSnapshot(groups: [
-                UsageGroup(provider: .deepseek, today: TokenStats(inputTokens: 100, outputTokens: 50, cacheReadTokens: 200), hourly: []),
-                UsageGroup(provider: .opencodeGo, today: TokenStats(), hourly: []),
-                UsageGroup(provider: .unknown, today: TokenStats(), hourly: []),
-            ], capturedAt: now)
+            let daily = DailyUsageSnapshot(
+                today: TokenStats(inputTokens: 100, outputTokens: 50, cacheReadTokens: 200),
+                hourly: [],
+                capturedAt: now
+            )
             let dsOK = BalanceResult(provider: .deepseek, balance: 65.92, currency: .cny, isAvailable: true)
             let ocOK = BalanceResult(provider: .opencodeGo, balance: 16, currency: .percent, usedPercent: 16)
 
@@ -1137,7 +1174,7 @@ public enum SelfCheck {
             check("Refresh.tick.dailyCalls", dailySource.callCount == 1)
             check("Refresh.tick.deepseek", state.balance(for: .deepseek).result?.balance == 65.92)
             check("Refresh.tick.opencode", state.balance(for: .opencodeGo).result?.usedPercent == 16)
-            check("Refresh.tick.daily", state.daily?.group(for: .deepseek).today.inputTokens == 100)
+            check("Refresh.tick.daily", state.daily?.today.inputTokens == 100)
             check("Refresh.tick.noConfigMissing", state.configMissing == false)
             check("Refresh.tick.selectedProviderUnchanged", state.selectedProvider == .deepseek)
 

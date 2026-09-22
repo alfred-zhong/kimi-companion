@@ -13,8 +13,9 @@ import Foundation
 /// 2. `usage.record` 是**单次 LLM 调用的增量**，不是累计快照
 ///    （同一 session 的 `output` 序列实测非单调：187 → 165 → 170 → 1654 → …）。
 ///    因此直接按其字段求和，**不做差分**。
-/// 3. 归属只能看 `model` 的 `<Provider>/<model>` 前缀。**不能**用 `llm.request.provider` ——
-///    那里的值是 wire 协议类型 `"openai"`，两个 provider 都是它。
+/// 3. 不读 `model`：用量已合并统计、不归属到 provider（ADR-0006），parser 不解析任何归属字段。
+///    （历史依据：`llm.request.provider` 的值是 wire 协议类型 `"openai"`，两个 provider 都是它，
+///    本来也不能用于归属。）
 public struct WireLineParser: Sendable {
     public init() {}
 
@@ -29,25 +30,17 @@ public struct WireLineParser: Sendable {
         guard let data = line.data(using: .utf8) else { return nil }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         guard (json["type"] as? String) == "usage.record" else { return nil }
-        guard let model = json["model"] as? String else { return nil }
         guard let tsMs = int64Value(json["time"]) else { return nil }
 
         let usage = json["usage"] as? [String: Any] ?? [:]
         return UsageEvent(
             tsMs: tsMs,
-            provider: ProviderID.fromModelPrefix(prefix(of: model)),
             inputOther: intValue(usage["inputOther"]),
             output: intValue(usage["output"]),
             cacheRead: intValue(usage["inputCacheRead"]),
             cacheCreation: intValue(usage["inputCacheCreation"]),
             dedupeKey: "\(relPath):\(lineOffset)"
         )
-    }
-
-    /// `"OpenCode Go/deepseek-v4.1-flash"` → `"OpenCode Go"`（含空格，逐字保留）。
-    private func prefix(of model: String) -> String {
-        guard let slash = model.firstIndex(of: "/") else { return model }
-        return String(model[..<slash])
     }
 
     private func intValue(_ v: Any?) -> Int {
@@ -65,8 +58,6 @@ public struct WireLineParser: Sendable {
 
 public struct UsageEvent: Sendable, Equatable {
     public let tsMs: Int64
-    /// 由 `model` 前缀解析出的归属；未匹配受支持 provider 时为 `.unknown`（归入「其他」）。
-    public let provider: ProviderID
     public let inputOther: Int
     public let output: Int
     public let cacheRead: Int
@@ -75,7 +66,6 @@ public struct UsageEvent: Sendable, Equatable {
 
     public init(
         tsMs: Int64,
-        provider: ProviderID,
         inputOther: Int,
         output: Int,
         cacheRead: Int,
@@ -83,7 +73,6 @@ public struct UsageEvent: Sendable, Equatable {
         dedupeKey: String
     ) {
         self.tsMs = tsMs
-        self.provider = provider
         self.inputOther = inputOther
         self.output = output
         self.cacheRead = cacheRead

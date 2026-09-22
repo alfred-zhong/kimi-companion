@@ -1,6 +1,6 @@
 # kimi-companion
 
-macOS 菜单栏常驻 app，展示 kimi-code desktop 所用第三方 Provider 的余额 / 配额与各 Provider 自己的 token 消耗。
+macOS 菜单栏常驻 app，展示 kimi-code desktop 所用第三方 Provider 的余额 / 配额，以及一份**合并的** token 消耗统计。
 
 ## Language
 
@@ -17,7 +17,7 @@ kimi-code 经 `config.toml` 的 `[providers.*]` 段配置的第三方模型服�
 _Avoid_: 服务商、模型提供方、平台
 
 **Provider Name**:
-`[providers.<name>]` 的段名，逐字使用（`DeepSeek`、`OpenCode Go`，后者含空格）；它同时是配置键、用量归属的前缀、菜单 section 的标题。
+`[providers.<name>]` 的段名，逐字使用（`DeepSeek`、`OpenCode Go`，后者含空格）；它同时是配置键与菜单 section 的标题。
 _Avoid_: provider id、provider key、显示名
 
 **Balance**:
@@ -73,32 +73,24 @@ kimi-code 按 agent 追加写入的会话记录文件（`wire.jsonl`）；用量
 _Avoid_: 会话日志、transcript、日志文件
 
 **Usage Record**:
-Wire Log 里一条 `usage.record` 行：单次 LLM 调用的**增量**（不是累计快照），携带模型前缀与四个 token 计数。
+Wire Log 里一条 `usage.record` 行：单次 LLM 调用的**增量**（不是累计快照），携带四个 token 计数。其中的 `model` 字段**不被读取**——用量不按模型或 Provider 区分。
 _Avoid_: 用量快照、累计用量
 
 **Daily Usage**:
-当日（本地零点至此刻）全部会话的 token 聚合，按 Provider 归属分组。
+当日（本地零点至此刻）全部会话的 token 合计，**一份合并**的数字，不按 Provider 或模型区分。
 _Avoid_: 今天用量、今日统计
 
 **Last-5h Usage**:
-后 5 个小时桶的并集，等价于 `[now − 5h, now]`。
+后 5 个小时桶的并集，等价于 `[now − 5h, now]`；与 Daily Usage 同为合并口径。
 _Avoid_: 近五小时、5 小时用量
 
 **Token Stats**:
-一段窗口的 token 四元组：输入（非缓存）、输出、缓存创建、缓存读取。
+一段窗口（合并统计，不区分 Provider / 模型）的 token 四元组：输入（非缓存）、输出、缓存创建、缓存读取。
 _Avoid_: 用量统计、token 数
 
 **Cache Hit Rate**:
 缓存读取占全部输入 token 的比例，分母为输入 + 缓存创建 + 缓存读取。
 _Avoid_: 命中率、缓存率
-
-**Usage Attribution**:
-把一条用量记录按模型标识的 `<Provider>/` 前缀归到某个 Provider；前缀逐字匹配 Provider Name。
-_Avoid_: 归属映射、分组、路由
-
-**Unmatched Usage**:
-未匹配任何受支持 Provider 的用量；落到「其他」桶并在菜单尾行展示，不丢弃。
-_Avoid_: 未知用量、遗留用量、兜底桶
 
 **Selected Provider**:
 菜单栏当前展示哪个 Provider 的值；由用户从下拉菜单显式选择并持久化，采集失败时不自动切换。

@@ -7,7 +7,7 @@ import Foundation
 /// `SelfCheck` 因此可以完全不碰真实 UI 地断言全部渲染逻辑。
 /// - `renderTitle` 处理菜单栏标题优先级链
 /// - `renderChrome` 输出胶囊外观参数
-/// - `renderMenu` 重建弹出菜单（两个 provider section + 菜单栏选择 + caffeinate）
+/// - `renderMenu` 重建弹出菜单（两个 provider section + 合并用量块 + 菜单栏选择 + caffeinate）
 public enum StatusBarPresenter {
 
     // MARK: - Inputs
@@ -227,20 +227,18 @@ public enum StatusBarPresenter {
 
     /// 弹出菜单。
     ///
-    /// 结构（固定顺序，两个 provider 永远都在）：
+    /// 结构（固定顺序，两个 provider 永远都在；用量只有**一份合并**的，不按 provider 分）：
     /// ```
     /// DeepSeek
     ///   余额 ¥65.92 [⚠]
-    ///   今日 · ↑… · ↓… · ⚡… · 🎯…%
-    ///   近5h · …
     /// ──────
     /// OpenCode Go
     ///   [5h ███ 16% 4h17m 后重置]
     ///   [7d ███ 22% 5d3h 后重置]
     ///   [月度 ██ 13% 26d 后重置]
-    ///   今日 · …
-    ///   近5h · …
-    /// 其他 · …                     ← 仅当存在未匹配任何 provider 的用量
+    /// ──────
+    /// 今日 · ↑… · ↓… · ⚡… · 🎯…%
+    /// 近 5h · …
     /// ──────
     /// 菜单栏显示 ▸ (DeepSeek / OpenCode Go，选中打 ✓)
     /// ──────
@@ -258,12 +256,11 @@ public enum StatusBarPresenter {
             items.append(contentsOf: providerSection(pid, inputs, now: now))
         }
 
-        // 未匹配任何受支持 provider 的用量：落到尾行，而不是被丢掉。
-        if let daily = inputs.daily, !daily.unmatched.today.isEmpty {
-            items.append(MenuItemSpec(title: dailyLine(prefix: "其他", stats: daily.unmatched.today), enabled: false))
-        }
-        if inputs.daily == nil, let err = inputs.lastDailyError {
-            items.append(MenuItemSpec(title: "用量: \(err)", enabled: false))
+        // 两个 provider section 之后、菜单栏选择之前：一份合并的用量块。
+        let usage = usageItems(inputs)
+        if !usage.isEmpty {
+            items.append(.separator)
+            items.append(contentsOf: usage)
         }
 
         items.append(.separator)
@@ -288,7 +285,8 @@ public enum StatusBarPresenter {
         return items
     }
 
-    /// 单个 provider 的 section：header（只有 provider 名，不带模型名）+ 值行 + 该 provider 自己的用量行。
+    /// 单个 provider 的 section：header（只有 provider 名，不带模型名）+ 余额 / 配额行。
+    /// 用量行不在这里 —— 用量是全局合并的一份，见 `usageItems`。
     private static func providerSection(_ pid: ProviderID, _ inputs: Inputs, now: Date) -> [MenuItemSpec] {
         var items: [MenuItemSpec] = [MenuItemSpec(title: pid.displayName, enabled: false)]
         let state = inputs.balance(for: pid)
@@ -308,12 +306,22 @@ public enum StatusBarPresenter {
             ))
         }
 
-        if let daily = inputs.daily {
-            let group = daily.group(for: pid)
-            items.append(MenuItemSpec(title: dailyLine(prefix: "今日", stats: group.today), enabled: false))
-            items.append(MenuItemSpec(title: dailyLine(prefix: "近5h", stats: group.last5h), enabled: false))
-        }
         return items
+    }
+
+    /// 合并用量块：今日 + 近 5h，不区分 provider / model。
+    /// 快照缺失时退化为错误行；两者都没有则不占位（调用方不追加分隔线）。
+    private static func usageItems(_ inputs: Inputs) -> [MenuItemSpec] {
+        if let daily = inputs.daily {
+            return [
+                MenuItemSpec(title: dailyLine(prefix: "今日", stats: daily.today), enabled: false),
+                MenuItemSpec(title: dailyLine(prefix: "近 5h", stats: daily.last5h), enabled: false),
+            ]
+        }
+        if let err = inputs.lastDailyError {
+            return [MenuItemSpec(title: "用量: \(err)", enabled: false)]
+        }
+        return []
     }
 
     /// 余额 / 配额的数值行。

@@ -10,16 +10,16 @@ import Foundation
 public enum ProviderID: String, CaseIterable, Sendable {
     case deepseek
     case opencodeGo = "opencode-go"
-    /// 未匹配任何受支持 provider；只用于「其他」用量归属与 logo 缺省分支。
+    /// 未匹配任何受支持 provider；只用作 `default_model` 前缀推导的失败哨兵与 logo 缺省分支。
     case unknown
 
     /// config.toml 里的段名，**逐字**使用（`"OpenCode Go"` 含空格）。
-    /// 同时也是 `usage.record.model` 的 `<Provider>/<model>` 前缀。
     public var configSectionName: String {
         switch self {
         case .deepseek: return "DeepSeek"
         case .opencodeGo: return "OpenCode Go"
-        case .unknown: return "其他"
+        // `.unknown` 不是配置段：查表路径一律遍历 `ProviderID.supported`，走不到这里。
+        case .unknown: return rawValue
         }
     }
 
@@ -291,18 +291,18 @@ public struct HourBucket: Equatable, Sendable {
     }
 }
 
-/// 按归属（provider 或「其他」）分组的用量聚合。
-public struct UsageGroup: Equatable, Sendable {
-    /// 受支持 provider，或 `.unknown`（未匹配任何 provider 的「其他」桶）。
-    public let provider: ProviderID
+/// 日用量快照：全部会话合并成**一份**，不按 provider / model 区分（ADR-0006）。
+public struct DailyUsageSnapshot: Sendable, Equatable {
+    /// 当日（本地零点至 `capturedAt`）全部会话的 token 合计。
     public let today: TokenStats
-    /// 长度 12，index 0 最旧、末位最新；区间左开右闭 `(startMs, endMs]`。
+    /// 长度 12，index 0 最旧、末位最新；区间左开右闭 `(startMs, endMs]`；末桶是完整一小时。
     public let hourly: [HourBucket]
+    public let capturedAt: Date
 
-    public init(provider: ProviderID, today: TokenStats, hourly: [HourBucket]) {
-        self.provider = provider
+    public init(today: TokenStats, hourly: [HourBucket], capturedAt: Date) {
         self.today = today
         self.hourly = hourly
+        self.capturedAt = capturedAt
     }
 
     /// 后 5 个小时桶的并集，等价于 `[now-5h, now]`。
@@ -313,31 +313,6 @@ public struct UsageGroup: Equatable, Sendable {
         }
         return sum
     }
-}
-
-/// 日用量快照。
-public struct DailyUsageSnapshot: Sendable, Equatable {
-    /// 每个归属一份，顺序恒为 `ProviderID.supported + [.unknown]`。
-    public let groups: [UsageGroup]
-    public let capturedAt: Date
-
-    public init(groups: [UsageGroup], capturedAt: Date) {
-        self.groups = groups
-        self.capturedAt = capturedAt
-    }
-
-    /// 取某个归属的聚合；缺省返回全零空组（长度恒为 12 的桶），调用方无需处理 nil。
-    public func group(for provider: ProviderID) -> UsageGroup {
-        if let hit = groups.first(where: { $0.provider == provider }) { return hit }
-        return UsageGroup(
-            provider: provider,
-            today: TokenStats(),
-            hourly: (0..<HOUR_BUCKET_COUNT).map { _ in HourBucket(startMs: 0, endMs: 0) }
-        )
-    }
-
-    /// 未匹配任何受支持 provider 的用量（「其他」）。
-    public var unmatched: UsageGroup { group(for: .unknown) }
 }
 
 // MARK: - Caffeinate (阻止系统休眠)

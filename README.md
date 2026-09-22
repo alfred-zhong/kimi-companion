@@ -1,6 +1,6 @@
 # kimi-companion
 
-Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock 图标），展示 **kimi-code desktop 所用第三方 Provider 的余额 / 配额**，以及各 Provider 自己的 token 消耗。
+Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock 图标），展示 **kimi-code desktop 所用第三方 Provider 的余额 / 配额**，以及一份**合并的** token 消耗统计。
 
 ## 功能
 
@@ -8,9 +8,9 @@ Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock �
   - DeepSeek → `¥65.92`（CNY 账户余额）
   - OpenCode Go → `16%`（5h 滚动窗口已用百分比）
 - 弹出菜单（两个 Provider 的 section 永远都在，顺序固定）：
-  - `DeepSeek`：余额行 + `今日 · ↑输入 · ↓输出 · ⚡缓存读取 · 🎯hit%` + `近5h · …`
-  - `OpenCode Go`：5h / 7d / 月度三窗口进度条行（各自重置倒计时）+ 今日 / 近 5h 用量
-  - `其他 · …`：未匹配任何受支持 Provider 的用量（有才显示）
+  - `DeepSeek`：余额行
+  - `OpenCode Go`：5h / 7d / 月度三窗口进度条行（各自重置倒计时）
+  - `今日 · ↑输入 · ↓输出 · ⚡缓存读取 · 🎯hit%` / `近 5h · …`：**全部会话合并**的一份用量，不按 Provider 或模型区分
   - `菜单栏显示 ▸`：切换菜单栏展示的 Provider
   - `阻止系统休眠 ▸`：30 / 60 / 120 分钟 + 倒计时行 + 取消守护
   - `偏好…` / `立即刷新` / `退出`
@@ -42,7 +42,7 @@ base_url = "https://opencode.ai/zen/go/v1"
 api_key = "sk-..."
 ```
 
-- 段名逐字使用（`DeepSeek`、`OpenCode Go`），它同时是配置键、用量归属的前缀、菜单 section 的标题。
+- 段名逐字使用（`DeepSeek`、`OpenCode Go`），它同时是配置键与菜单 section 的标题。
 - `api_key` 为空 / 全空白视为没有凭据；段里只写了 `api_key_env` 时视为凭据不可解析（菜单里会说明原因）——Finder 启动的 GUI app 不继承用户 shell 环境，读环境变量不可靠。
 - 该文件不存在、无权限或 TOML 非法时，菜单栏降级为 `?kimi`。
 
@@ -50,10 +50,10 @@ api_key = "sk-..."
 
 token 消耗来自 kimi-code 的会话记录：`~/.kimi-code/sessions/<workspace>/<session>/agents/<agent>/wire.jsonl` 里的 `usage.record` 行。
 
-- 归属按记录的 `model` 字段 `<Provider>/<model>` 前缀逐字匹配 Provider 名（`llm.request.provider` 恒为 wire 协议类型 `"openai"`，两个 Provider 都是它，不能用来判归属）。
+- **不区分 Provider 与模型**：只读记录的 `time` 与 `usage` 四个计数，`model` 字段完全不被读取。所有记录（含不匹配任何 Provider 的模型标识）都计入同一份合计（决策见 `docs/adr/0006-combined-usage.md`）。
 - 每条 `usage.record` 是**单次调用的增量**，直接求和，不做差分。
 - 读取是增量的：进程内维护每个文件的读取游标，每次只读自上次以来追加的字节；保留窗口为 `min(当日零点, now − 12h)`。游标不落盘，进程重启后首次刷新做一次全量。
-- 聚合出「今日」与「近 5h」（后 5 个滑动小时桶的并集），未匹配任何 Provider 的用量归入「其他」。
+- 聚合出「今日」与「近 5h」（后 5 个滑动小时桶的并集），两者都是全部会话的合计。
 
 ## 编译与运行
 
@@ -76,7 +76,7 @@ open build/kimi-companion.app
 swift run kimi-companion --self-check
 ```
 
-输出 `[self-check] OK (全部通过)` 即表示全部断言通过（余额与配额的响应解码、格式化、用量归属与去重、增量读取契约、tick 状态机、菜单与状态栏渲染、休眠守护路径）。**不做任何真实网络请求**，也不触碰真实 UI。
+输出 `[self-check] OK (全部通过)` 即表示全部断言通过（余额与配额的响应解码、格式化、用量合并口径与去重、增量读取契约、tick 状态机、菜单与状态栏渲染、休眠守护路径）。**不做任何真实网络请求**，也不触碰真实 UI。
 
 ## 切换菜单栏展示的 Provider
 
@@ -102,6 +102,7 @@ swift run kimi-companion --self-check
 
 - `0001-standalone-menubar-app.md` — 为什么必须是独立菜单栏 app（kimi-code 没有 UI 扩展点）
 - `0002-credentials-from-config-toml.md` — 为什么凭据只读 `config.toml`，不做偏好面板凭据存储
-- `0003-usage-attribution-by-model-prefix.md` — 为什么按 `model` 前缀归属用量
+- `0003-usage-attribution-by-model-prefix.md` — 为什么按 `model` 前缀归属用量（**已被 0006 取代**）
 - `0004-wire-log-read-cursor.md` — wire 日志的增量读取与 Read Cursor
 - `0005-menubar-provider-is-explicit.md` — 为什么菜单栏 Provider 是显式选择
+- `0006-combined-usage.md` — 为什么用量是合并的一份、不再按 Provider / model 区分

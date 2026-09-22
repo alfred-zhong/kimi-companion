@@ -1,10 +1,12 @@
 # 0003 — 用量按 `model` 的 `<Provider>/` 前缀归属
 
+> **已被 [0006](0006-combined-usage.md) 取代**：用量不再按 provider / model 区分，`model` 字段不再被读取。本文保留为历史决策与实测证据（其中「每个 agent 的 `wire.jsonl` 独立、跨文件零重复」与「`usage.record` 是单次调用增量」两条事实仍被 0006 继承）。
+
 per-provider 的 token 用量按 `usage.record.model` 的 `<Provider>/` 前缀归属，逐字匹配（其中一个 provider 名含空格）。`llm.request` 事件的 `provider` 字段**恒为 `"openai"`**，是 wire 协议类型而非 provider 身份，不能用于归属。未匹配任何已知 provider 的用量在菜单尾行单独成行，不丢弃。
 
 ## Status
 
-已采纳（Accepted）。
+已被取代（Superseded by [0006](0006-combined-usage.md)）。
 
 ## Context
 
