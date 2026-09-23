@@ -22,3 +22,8 @@
 
 - 用量统计不再按 Provider 或 model 区分：下拉菜单里只剩**一份**合并的 `今日` / `近 5h`，位于两个 Provider section 之后、「菜单栏显示」之前。
 - 移除按 `usage.record.model` 的 `<Provider>/` 前缀归属用量的逻辑：`model` 字段不再被读取，`UsageGroup` / 「其他」尾行一并删除；任何 `model` 前缀的记录都计入同一份合计（决策见 `docs/adr/0006-combined-usage.md`，原 `docs/adr/0003-usage-attribution-by-model-prefix.md` 已被取代）。
+
+### Bug 修复
+
+- OpenCode Go 三个窗口的进度条过短：右区此前固定预留 168pt 而实际文案（`4h17m 后重置`）只占 ~80pt，条长被压到下限 60pt 且每行右侧留一大块空白。改为按本行文本实测预留宽度（下限 84pt，更长时按实测加宽），条长下限提到 150pt，整行铺满宽度。
+- 进度条行右侧的 `xxx 后重置` 距菜单右缘仅 ~12pt，比其他菜单项（分隔线 / 快捷键列停在 ~15pt）更贴边。右区文本改留 `trailingRightMargin`(20pt)，实测距右缘 ~18pt，成为菜单里最内缩的一列。

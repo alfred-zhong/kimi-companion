@@ -1061,14 +1061,40 @@ public enum SelfCheck {
             check("Segment.redEdge", UsageBarMenuItemView.segment(for: 90.1, isOK: true) == .red)
             check("Segment.red", UsageBarMenuItemView.segment(for: 100, isOK: true) == .red)
 
-            // 进度条最短长度不变量。
+            // 进度条最短长度不变量：视图宽取 `minimumWidth` 时条长恰好落在 `minBarWidth` 上。
+            let labeledFloor = UsageBarMenuItemView.minTrailingRegionWidth
             check("Menu.bar.minLength.labeled",
-                  UsageBarMenuItemView.barWidth(totalWidth: UsageBarMenuItemView.minimumWidth(hasLeftLabel: true), hasLeftLabel: true)
-                  >= UsageBarMenuItemView.minBarWidth)
+                  UsageBarMenuItemView.barWidth(
+                      totalWidth: UsageBarMenuItemView.minimumWidth(hasLeftLabel: true, trailingWidth: labeledFloor),
+                      hasLeftLabel: true,
+                      trailingWidth: labeledFloor
+                  ) >= UsageBarMenuItemView.minBarWidth)
             check("Menu.bar.minLength.unlabeled",
-                  UsageBarMenuItemView.barWidth(totalWidth: UsageBarMenuItemView.minimumWidth(hasLeftLabel: false), hasLeftLabel: false)
-                  >= UsageBarMenuItemView.minBarWidth)
-            check("Menu.bar.minBarWidth", UsageBarMenuItemView.minBarWidth == 60)
+                  UsageBarMenuItemView.barWidth(
+                      totalWidth: UsageBarMenuItemView.minimumWidth(hasLeftLabel: false, trailingWidth: labeledFloor),
+                      hasLeftLabel: false,
+                      trailingWidth: labeledFloor
+                  ) >= UsageBarMenuItemView.minBarWidth)
+            check("Menu.bar.minBarWidth", UsageBarMenuItemView.minBarWidth == 150)
+            // 右区文本不得比其他菜单项更贴边：留白 ≥ 菜单内容缩进（分隔线 / 快捷键列停在 ~15pt）。
+            check("Menu.bar.trailingRightMargin", UsageBarMenuItemView.trailingRightMargin >= 15)
+
+            // 右区预留宽度：无文本 → 0；短文本落回下限；长文本（含原始 status）按实测加宽且不挤掉进度条。
+            check("Menu.bar.trailingNone", UsageBarMenuItemView.trailingWidth(for: nil) == 0)
+            check("Menu.bar.trailingEmpty", UsageBarMenuItemView.trailingWidth(for: "") == 0)
+            check("Menu.bar.trailingFloor",
+                  UsageBarMenuItemView.trailingWidth(for: "1h0m 后重置") == UsageBarMenuItemView.minTrailingRegionWidth)
+            let longTrailing = UsageBarMenuItemView.trailingWidth(for: "rate-limited · 26d 后重置")
+            check("Menu.bar.trailingLongWidens", longTrailing > UsageBarMenuItemView.minTrailingRegionWidth)
+            check("Menu.bar.trailingLongKeepsMinBar",
+                  UsageBarMenuItemView.barWidth(
+                      totalWidth: UsageBarMenuItemView.minimumWidth(hasLeftLabel: true, trailingWidth: longTrailing),
+                      hasLeftLabel: true,
+                      trailingWidth: longTrailing
+                  ) >= UsageBarMenuItemView.minBarWidth)
+            // 三窗口正常形态共用下限 → 条长一致（多行对齐）。
+            let normalTrailings = ["4h17m 后重置", "5d3h 后重置", "26d 后重置"].map(UsageBarMenuItemView.trailingWidth(for:))
+            check("Menu.bar.normalRowsShareFloor", normalTrailings.allSatisfy { $0 == UsageBarMenuItemView.minTrailingRegionWidth })
 
             // 失败状态：每个 provider 自己的中文文案出现在自己的 section 里。
             let mixed = StatusBarPresenter.renderMenu(

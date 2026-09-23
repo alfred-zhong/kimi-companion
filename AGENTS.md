@@ -182,7 +182,8 @@ public func tick() async {
 - `DailyUsageSnapshot.last5h` = `hourly.suffix(5)` 的并集，等价 `[now-5h, now]`。
 - 事件 `tsMs < todayStartMs` 不算「今日」，但**仍可**进小时桶（窗口可跨零点）；`hoursAgo ∉ [0, 12)` 才丢。
 - 去重键形如 `"\(relPath):\(lineOffset)"`，**不要**改成其它样式，否则会和去重语义冲突。
-- 段色：`isOK == false` → 强制红；否则 `<70` 绿 / `70–90` 黄 / `>90` 红。进度条最短 60pt，视图宽度以 240pt 为底按需加宽。
+- 段色：`isOK == false` → 强制红；否则 `<70` 绿 / `70–90` 黄 / `>90` 红。
+- 进度条行宽：右区（状态串 / 重置倒计时）按**本行文本实测**预留（`trailingWidth(for:)`，无文本 0，下限 `minTrailingRegionWidth` 84pt），条长下限 `minBarWidth` 150pt，右区文本距视图右缘留 `trailingRightMargin` 20pt（比菜单自身内容缩进 ~15pt 再宽一点，别让 `xxx 后重置` 比别的菜单项贴边）；视图宽度直接取 `minimumWidth(hasLeftLabel:trailingWidth:)`，因此整行铺满宽度、三窗口正常形态条长一致（只有带原始 status 的限流行会短一截）。**不要**退回「固定预留宽度 + 240pt 底宽」的写法，那会把条压到 60pt 并在右侧留一大块空白。
 
 ## Important Files
 
