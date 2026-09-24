@@ -16,12 +16,19 @@
 - 错误降级永不空白：`config.toml` 不可读 / 非法时菜单栏显示 `?kimi`；单个 Provider 的段缺失、`api_key` 为空、使用 `api_key_env` 或远端失败时显示 `⚠︎配置` / `⚠︎凭据`，下拉菜单给出可照抄去改配置的中文说明；抓取失败但存在旧值时保留旧值并标注「旧值」。
 - SwiftUI 偏好面板：刷新间隔三档（30 / 60 / 120 秒，默认 60 秒），存量非法值自动回退默认档并写回自愈。
 - 一键构建：`./build.sh`（编译 + 复制 `Resources/*.png` + 拼 `.app` bundle + ad-hoc 签名）。
-- 自检入口：`swift run kimi-companion --self-check`，覆盖格式化 / 响应解码 / 用量合并口径 / 增量读取契约 / tick 状态机 / 菜单与状态栏渲染 / 守护路径。
+- 自检入口：`swift run kimi-companion --self-check`，覆盖格式化 / 响应解码 / 用量合并口径 / 增量读取契约 / tick 状态机 / 菜单与状态栏渲染 / 守护路径 / 清理策略与产物修剪。
+- 菜单新增 `清理 session 文件…`（`立即刷新` 之后、独立成组、无快捷键）：点击后先在后台扫描 `~/.kimi-code`，弹出预览（相当于脚本的 `--dry-run`，只列将被删除的 session，按工作区分组并给出可回收体积），用户点「确定」才真删，点「取消」什么都不做；删完再弹结果，并触发一次完整刷新。这是 app 唯一的破坏性能力（决策见 `docs/adr/0007-session-cleanup-in-app.md`）。
+- 清理策略两道参数 + 一道常量：**工作区保留数**（默认 3，范围 1…20）与**保留天数**（默认 7，范围 0…365，`0` 表示不限），另加写死的 30 分钟活跃保护。判定是合取——只有「不在保留名额内」「距最后更新 ≥ 30 分钟」「已满保留天数」三条同时成立才删，每个工作区永远保留最新 1 个。
+- 一次清理清完全部产物：session 目录、孤儿事件流（`server/events/session_*.jsonl` 中不对应任何现存 session 的，删完目录后重新枚举）、`session_index.jsonl` 里指向已消失目录的行、`file-history/<桶>` 里目录已不存在的账本条目。逐项 best-effort，失败数与失败路径在完成弹窗里上报；`__global__.jsonl` 永不删，`server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspaces.json`、`config.toml` 一律不碰。
+- 清理预览在无可删项时不只说「无需清理」，而是给出可诊断的说明（当前策略 / 现存个数 / 总体积 / 最老年龄）；`sessions` 根目录不存在时也明确说明。检测到 Kimi Code 桌面端在运行会在预览里加一行警告，但不禁用「确定」。
+- 偏好面板新增「工作区保留数」「保留天数」两项 `Stepper`，越界值夹回合法范围后写回 UserDefaults；`保留天数 = 0` 展示为「不限」。
 
 ### 变更
 
 - 用量统计不再按 Provider 或 model 区分：下拉菜单里只剩**一份**合并的 `今日` / `近 5h`，位于两个 Provider section 之后、「菜单栏显示」之前。
 - 移除按 `usage.record.model` 的 `<Provider>/` 前缀归属用量的逻辑：`model` 字段不再被读取，`UsageGroup` / 「其他」尾行一并删除；任何 `model` 前缀的记录都计入同一份合计（决策见 `docs/adr/0006-combined-usage.md`，原 `docs/adr/0003-usage-attribution-by-model-prefix.md` 已被取代）。
+- `session_index.jsonl` 修剪改为**只摘掉**「有 `sessionDir` 字段且该目录已不存在」的行：kimi-code 自己写的墓碑行（`{"sessionId":…,"deleted":true}`）、不可解析的行、以及 `sessionDir` 不是非空绝对路径的行一律原样保留（路径形态不对时无法判定目录是否存在，保留一行只是留个残条，删掉一行却可能丢掉活着的 session），不再像脚本那样按 `sessionId` 是否存活整行删除。写前备份为 `session_index.jsonl.bak-<yyyyMMddHHmmss>`（本地时区）而不是会被每次运行覆盖的固定 `.bak` 名，且只有真的有改动时才写文件、才留备份。
+- 偏好窗口从 360×96 放大到 420×170，容纳清理策略两项参数。
 
 ### Bug 修复
 

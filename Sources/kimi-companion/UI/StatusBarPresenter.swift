@@ -77,6 +77,8 @@ public enum StatusBarPresenter {
             case forceRefresh
             case quit
             case showSettings
+            /// 「清理 session 文件…」：扫描 → 预览 → 确认后删除。
+            case cleanupSessions
             /// 「菜单栏显示 ▸」里选中某个 provider。
             case selectProvider
             case caffeinateBucket
@@ -246,6 +248,8 @@ public enum StatusBarPresenter {
     /// ──────
     /// 偏好… / 立即刷新
     /// ──────
+    /// 清理 session 文件…
+    /// ──────
     /// 退出
     /// ```
     public static func renderMenu(_ inputs: Inputs, now: Date = Date()) -> [MenuItemSpec] {
@@ -280,6 +284,9 @@ public enum StatusBarPresenter {
         items.append(.separator)
         items.append(MenuItemSpec(title: "偏好…", key: ",", action: .showSettings))
         items.append(MenuItemSpec(title: "立即刷新", key: "r", action: .forceRefresh))
+        items.append(.separator)
+        // 清理不依赖任何状态（不显示进度 / 计数），因此每次打开菜单都重建为「可用」即可。
+        items.append(MenuItemSpec(title: "清理 session 文件…", action: .cleanupSessions))
         items.append(.separator)
         items.append(MenuItemSpec(title: "退出", key: "q", action: .quit))
         return items

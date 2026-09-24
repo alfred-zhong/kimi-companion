@@ -1349,6 +1349,572 @@ public enum SelfCheck {
             }
         }
 
+        // MARK: - SessionCleanup（策略 / 大小格式化 / 文案）
+
+        do {
+            let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+            let dayMs: Int64 = 86_400_000
+            let policy = RetentionPolicy(keepCount: 3, retentionDays: 7)
+
+            func verdict(rank: Int, ageMs: Int64, _ policy: RetentionPolicy = policy) -> CleanupVerdict {
+                SessionCleanup.verdict(rank: rank, updatedAtMs: nowMs - ageMs, nowMs: nowMs, policy: policy)
+            }
+            func days(_ n: Double) -> Int64 { Int64(n * Double(dayMs)) }
+
+            // 合取策略：名额内 / 30 分钟内 / 天数内 → 保留，三条都过才删。
+            check("Cleanup.policy.keepCount.newest", verdict(rank: 0, ageMs: days(100)) == .keepInKeepCount)
+            check("Cleanup.policy.keepCount.lastSlot", verdict(rank: 2, ageMs: days(100)) == .keepInKeepCount)
+            check("Cleanup.policy.keepCount.outOfSlot", verdict(rank: 3, ageMs: days(100)) == .delete)
+            check("Cleanup.policy.protect.inside", verdict(rank: 9, ageMs: 30 * 60_000 - 1) == .keepRecentlyActive)
+            // 30 分钟保护窗口的边界要用「不限天数」的策略才看得见（否则会落到保留天数内）。
+            check("Cleanup.policy.protect.boundary",
+                  verdict(rank: 9, ageMs: 30 * 60_000, RetentionPolicy(keepCount: 1, retentionDays: 0)) == .delete)
+            check("Cleanup.policy.days.inside", verdict(rank: 9, ageMs: days(6.9)) == .keepWithinRetentionDays)
+            check("Cleanup.policy.days.boundary", verdict(rank: 9, ageMs: days(7)) == .delete)
+            check("Cleanup.policy.days.beyond", verdict(rank: 9, ageMs: days(7.1)) == .delete)
+            // 时钟异常（updatedAt 在未来）不删。
+            check("Cleanup.policy.futureStamp", verdict(rank: 9, ageMs: -days(1)) == .keepRecentlyActive)
+
+            check("Cleanup.policy.defaults", RetentionPolicy.default == RetentionPolicy(keepCount: 3, retentionDays: 7))
+            check("Cleanup.policy.protectMinutes", RetentionPolicy.protectMinutes == 30)
+            check("Cleanup.policy.keepCountFloored", RetentionPolicy(keepCount: 0).keepCount == 1)
+            check("Cleanup.policy.keepCountNegative", RetentionPolicy(keepCount: -5).keepCount == 1)
+            check("Cleanup.policy.daysNegative", RetentionPolicy(retentionDays: -1).retentionDays == 0)
+            // 即使绕过 init 的夹取把 keepCount 改成 0，每工作区仍保留最新 1 个。
+            var zeroKeep = RetentionPolicy()
+            zeroKeep.keepCount = 0
+            check("Cleanup.policy.zeroKeepKeepsNewest",
+                  SessionCleanup.verdict(rank: 0, updatedAtMs: nowMs - days(100), nowMs: nowMs, policy: zeroKeep) == .keepInKeepCount)
+            // retentionDays = 0 → 不限天数：老 session 照删。
+            let unlimited = RetentionPolicy(keepCount: 1, retentionDays: 0)
+            check("Cleanup.policy.unlimitedDeletesOld",
+                  SessionCleanup.verdict(rank: 1, updatedAtMs: nowMs - days(400), nowMs: nowMs, policy: unlimited) == .delete)
+            check("Cleanup.policy.unlimitedKeepsRecent",
+                  SessionCleanup.verdict(rank: 1, updatedAtMs: nowMs - 60_000, nowMs: nowMs, policy: unlimited) == .keepRecentlyActive)
+
+            // humanBytes：B 无小数，其余 1 位小数（对齐脚本 human() 语义）。
+            check("Cleanup.bytes.zero", CleanupPresenter.humanBytes(0) == "0 B")
+            check("Cleanup.bytes.1023", CleanupPresenter.humanBytes(1023) == "1023 B")
+            check("Cleanup.bytes.1024", CleanupPresenter.humanBytes(1024) == "1.0 KB")
+            check("Cleanup.bytes.kiloFloor", CleanupPresenter.humanBytes(1024 * 1024 - 1) == "1024.0 KB")
+            check("Cleanup.bytes.mega", CleanupPresenter.humanBytes(1024 * 1024) == "1.0 MB")
+            check("Cleanup.bytes.20.7MB", CleanupPresenter.humanBytes(21_700_000) == "20.7 MB")
+            check("Cleanup.bytes.giga", CleanupPresenter.humanBytes(1024 * 1024 * 1024) == "1.0 GB")
+            check("Cleanup.bytes.tera", CleanupPresenter.humanBytes(1024 * 1024 * 1024 * 1024) == "1.0 TB")
+            check("Cleanup.bytes.hugeTera", CleanupPresenter.humanBytes(2000 * 1024 * 1024 * 1024 * 1024) == "2000.0 TB")
+
+            check("Cleanup.shortId", CleanupPresenter.shortSessionId("session_10b4773e-4a3c-4158-893d-5e6a80273c84") == "session_10b4773e")
+            check("Cleanup.shortId.short", CleanupPresenter.shortSessionId("session_abc") == "session_abc")
+            check("Cleanup.shortId.other", CleanupPresenter.shortSessionId("not-a-session-id") == "not-a-session-id")
+        }
+
+        // MARK: - CleanupPresenter（预览 / 诊断 / 完成文案）
+
+        do {
+            let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+            let dayMs: Int64 = 86_400_000
+            let policy = RetentionPolicy(keepCount: 3, retentionDays: 7)
+
+            let doomed = ChatSessionRecord(
+                id: "session_10b4773e-4a3c-4158-893d-5e6a80273c84",
+                directory: URL(fileURLWithPath: "/tmp/session_10b4773e"),
+                workspace: "/Users/alfred/play",
+                updatedAtMs: nowMs - Int64(8.3 * Double(dayMs)),
+                byteSize: 21_700_000
+            )
+            let kept = ChatSessionRecord(
+                id: "session_kept0000",
+                directory: URL(fileURLWithPath: "/tmp/session_kept0000"),
+                workspace: "/Users/alfred/play",
+                updatedAtMs: nowMs,
+                byteSize: 100
+            )
+            let group = WorkspaceGroup(workspace: "/Users/alfred/play", items: [
+                CleanupPlanItem(record: kept, verdict: .keepInKeepCount),
+                CleanupPlanItem(record: doomed, verdict: .delete),
+            ])
+            let sixtyTwoPointSixMB = Int((62.6 * 1024 * 1024).rounded())
+            let plan = CleanupPlan(
+                groups: [group],
+                orphanEventJournals: [],
+                fileHistoryZombieIds: [],
+                totalSessionCount: 19,
+                totalBytes: sixtyTwoPointSixMB,
+                oldestAgeDays: 1.8,
+                deletionCount: 1,
+                reclaimableBytes: 21_700_000
+            )
+
+            let preview = CleanupPresenter.previewContent(
+                plan: plan, policy: policy, now: now, desktopRunning: false
+            )
+            check("Cleanup.preview.title", preview.title == "清理 session 文件")
+            check("Cleanup.preview.summary", preview.info == "将删除 1 个 session，释放 20.7 MB；保留 18 个。")
+            check("Cleanup.preview.confirmable", preview.confirmable)
+            check("Cleanup.preview.groupHeaderAndRow",
+                  preview.detail == "── /Users/alfred/play（1 个 · 20.7 MB）\n[将删除] 8.3 天前 · 20.7 MB · session_10b4773e")
+            check("Cleanup.preview.keptNotListed", preview.detail?.contains("session_kept0000") == false)
+            check("Cleanup.preview.noWarningWhenIdle", !preview.info.contains("⚠"))
+
+            let warned = CleanupPresenter.previewContent(
+                plan: plan, policy: policy, now: now, desktopRunning: true
+            )
+            check("Cleanup.preview.runningWarning",
+                  warned.info == preview.info + "\n" + CleanupPresenter.runningWarning())
+            check("Cleanup.preview.runningStillConfirmable", warned.confirmable)
+            check("Cleanup.preview.runningWarningText", CleanupPresenter.runningWarning().contains("Kimi Code"))
+
+            // 0 删除：不显示「无需清理」这种空话，给策略 + 现存规模 + 最老年龄的诊断，且只给一个「好」。
+            let noDeletion = CleanupPlan(
+                groups: [WorkspaceGroup(workspace: "/Users/alfred/play", items: [
+                    CleanupPlanItem(record: kept, verdict: .keepInKeepCount),
+                ])],
+                orphanEventJournals: [],
+                fileHistoryZombieIds: [],
+                totalSessionCount: 19,
+                totalBytes: sixtyTwoPointSixMB,
+                oldestAgeDays: 1.8,
+                deletionCount: 0,
+                reclaimableBytes: 0
+            )
+            let diagnostic = CleanupPresenter.previewContent(
+                plan: noDeletion, policy: policy, now: now, desktopRunning: false
+            )
+            check("Cleanup.preview.noDeletionText",
+                  diagnostic.info == "按当前策略（每工作区保留 3 个 / 早于 7 天）没有可清理的 session。"
+                      + "现存 19 个，共 62.6 MB，最老的 1.8 天。")
+            check("Cleanup.preview.noDeletionHasCounts",
+                  diagnostic.info.contains("现存 19 个") && diagnostic.info.contains("最老的 1.8 天"))
+            check("Cleanup.preview.noDeletionSingleButton", diagnostic.confirmable == false && diagnostic.detail == nil)
+            check("Cleanup.preview.policyLabel", CleanupPresenter.policyLabel(policy) == "每工作区保留 3 个 / 早于 7 天")
+            check("Cleanup.preview.policyLabel.unlimited",
+                  CleanupPresenter.policyLabel(RetentionPolicy(keepCount: 1, retentionDays: 0)) == "每工作区保留 1 个 / 不限天数")
+
+            // 空 home（一个 session 都没有）也要说清「没找到任何 session」。
+            let emptyHome = CleanupPlan(
+                groups: [], orphanEventJournals: [], fileHistoryZombieIds: [],
+                totalSessionCount: 0, totalBytes: 0, oldestAgeDays: 0, deletionCount: 0, reclaimableBytes: 0
+            )
+            let emptyContent = CleanupPresenter.previewContent(
+                plan: emptyHome, policy: policy, now: now, desktopRunning: false
+            )
+            check("Cleanup.preview.emptyHome", emptyContent.info.hasSuffix("未找到任何 session。"))
+
+            // 完成文案：一行结果 + 一行产物计数（0 也照写）；有失败时列出前 3 条路径。
+            let clean = CleanupOutcome(
+                deletedSessionCount: 3, deletedEventJournalCount: 2, reclaimedBytes: 21_700_000,
+                fileHistoryIdsRemoved: 1, indexRecordsRemoved: 0, failures: []
+            )
+            let done = CleanupPresenter.completionContent(clean)
+            check("Cleanup.completion.title", done.title == "清理完成")
+            check("Cleanup.completion.summary", done.info.hasPrefix("已删除 3 个 session，释放 20.7 MB；0 个删除失败"))
+            check("Cleanup.completion.counters",
+                  done.info.contains("session_index.jsonl 移除 0 条记录")
+                      && done.info.contains("file-history 清理 1 条条目")
+                      && done.info.contains("孤儿事件文件 2 个"))
+            check("Cleanup.completion.singleButton", done.confirmable == false && done.detail == nil)
+
+            let failed = CleanupOutcome(
+                deletedSessionCount: 1, deletedEventJournalCount: 0, reclaimedBytes: 1024,
+                fileHistoryIdsRemoved: 0, indexRecordsRemoved: 0,
+                failures: ["/a（Permission denied）", "/b（x）", "/c（y）", "/d（z）"]
+            )
+            let failedContent = CleanupPresenter.completionContent(failed)
+            check("Cleanup.completion.failureCount", failedContent.info.contains("4 个删除失败"))
+            check("Cleanup.completion.failurePathsFirstThree",
+                  failedContent.detail == "失败：/a（Permission denied）\n失败：/b（x）\n失败：/c（y）")
+
+            let missing = CleanupPresenter.missingRootContent(path: "/Users/x/.kimi-code/sessions")
+            check("Cleanup.missingRoot.content",
+                  missing.title == "清理 session 文件"
+                      && missing.info.contains("/Users/x/.kimi-code/sessions")
+                      && missing.info.contains("没有可清理的内容")
+                      && missing.confirmable == false
+                      && missing.detail == nil)
+
+            // NSAlert 接线（D5）：「确定」是第一个按钮（= .alertFirstButtonReturn）、「取消」第二个；
+            // 非确认形态只有一个「好」；详情区是固定高度的可滚动等宽文本区。
+            MainActor.assumeIsolated {
+                let confirmAlert = CleanupAlertPresenter.makeAlert(preview)
+                confirmAlert.layout()
+                check("Cleanup.alert.confirmButtonTitles", confirmAlert.buttons.map(\.title) == ["确定", "取消"])
+                check("Cleanup.alert.firstIsReturn", confirmAlert.buttons.first?.keyEquivalent == "\r")
+                // Return 键只能属于「确定」—— 这是 .alertFirstButtonReturn 的实际来源。
+                check("Cleanup.alert.returnKeyOnFirstOnly",
+                      confirmAlert.buttons.dropFirst().allSatisfy { $0.keyEquivalent != "\r" })
+                // 非确认形态只有一个「好」，而它就是 `.alertFirstButtonReturn`：
+                // 必须先看内容是否可确认，否则「看完告知点掉」会被当成「确认执行」。
+                check("Cleanup.alert.tellOnlyNotConfirmed",
+                      !CleanupAlertPresenter.isConfirmed(content: missing, response: .alertFirstButtonReturn))
+                check("Cleanup.alert.confirmAccepted",
+                      CleanupAlertPresenter.isConfirmed(content: preview, response: .alertFirstButtonReturn))
+                check("Cleanup.alert.cancelRejected",
+                      !CleanupAlertPresenter.isConfirmed(content: preview, response: .alertSecondButtonReturn))
+                check("Cleanup.alert.informativeText", confirmAlert.informativeText == preview.info)
+                check("Cleanup.alert.messageText", confirmAlert.messageText == preview.title)
+                let scroll = confirmAlert.accessoryView as? NSScrollView
+                check("Cleanup.alert.accessoryIsScrollView", scroll != nil)
+                check("Cleanup.alert.accessoryFixedHeight", scroll?.frame.height == CleanupAlertPresenter.detailHeight)
+                check("Cleanup.alert.accessoryScrollsVertically", scroll?.hasVerticalScroller == true)
+                let textView = scroll?.documentView as? NSTextView
+                check("Cleanup.alert.detailText", textView?.string == preview.detail)
+                check("Cleanup.alert.detailMonospaced", textView?.font?.isFixedPitch == true)
+                check("Cleanup.alert.detailNotEditable", textView?.isEditable == false)
+
+                let singleAlert = CleanupAlertPresenter.makeAlert(diagnostic)
+                singleAlert.layout()
+                check("Cleanup.alert.singleButtonTitle", singleAlert.buttons.map(\.title) == ["好"])
+                check("Cleanup.alert.noAccessoryWithoutDetail", singleAlert.accessoryView == nil)
+            }
+        }
+
+        // MARK: - SessionCleanup（分组键 / 回退链 / 索引与账本修剪 / 端到端）
+
+        do {
+            let fm = FileManager.default
+            var roots: [URL] = []
+            defer { for r in roots { try? fm.removeItem(at: r) } }
+
+            func makeRoot(_ label: String) -> URL {
+                let url = fm.temporaryDirectory
+                    .appendingPathComponent("kimi-companion-cleanup-\(label)-\(UUID().uuidString)", isDirectory: true)
+                roots.append(url)
+                return url
+            }
+            func write(_ root: URL, _ rel: String, _ text: String) {
+                let url = root.appendingPathComponent(rel)
+                try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? Data(text.utf8).write(to: url)
+            }
+            func writeBytes(_ root: URL, _ rel: String, _ count: Int) {
+                let url = root.appendingPathComponent(rel)
+                try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try? Data(repeating: 0x61, count: count).write(to: url)
+            }
+            func exists(_ root: URL, _ rel: String) -> Bool {
+                fm.fileExists(atPath: root.appendingPathComponent(rel).path)
+            }
+            func readText(_ root: URL, _ rel: String) -> String? {
+                try? String(contentsOf: root.appendingPathComponent(rel), encoding: .utf8)
+            }
+            /// `state.json` 的最小形状（只放清理关心的字段）。
+            func state(cwd: String? = nil, updatedAt: Int64? = nil, createdAt: Int64? = nil) -> String {
+                var parts = ["\"id\":\"session_x\"", "\"version\":2"]
+                if let cwd { parts.append("\"cwd\":\"\(cwd)\"") }
+                if let updatedAt { parts.append("\"updatedAt\":\(updatedAt)") }
+                if let createdAt { parts.append("\"createdAt\":\(createdAt)") }
+                return "{" + parts.joined(separator: ",") + "}"
+            }
+            func backups(_ root: URL) -> [String] {
+                ((try? fm.contentsOfDirectory(atPath: root.path)) ?? [])
+                    .filter { $0.hasPrefix("session_index.jsonl.bak-") }
+            }
+
+            let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+            let dayMs: Int64 = 86_400_000
+
+            // 数据根路径推导：`dataHome(userHome:)` 是 app 里唯一的拼接点。
+            do {
+                let derived = SessionCleanup.dataHome(userHome: "/Users/example")
+                check("Cleanup.paths.dataHome", derived.path == "/Users/example/.kimi-code")
+                let engine = SessionCleanup(kimiCodeHome: derived)
+                check("Cleanup.paths.sessionsRoot",
+                      engine.sessionsRoot.path == "/Users/example/.kimi-code/sessions")
+                check("Cleanup.paths.notUserHomeSessions",
+                      !engine.sessionsRoot.path.hasPrefix("/Users/example/sessions"))
+            }
+
+            // 分组键：`cwd` 优先，缺失用桶名；updatedAt → createdAt → 目录 mtime。
+            do {
+                let root = makeRoot("group")
+                write(root, "sessions/wd_one_111111111111/session_aaaa1111/state.json",
+                      state(cwd: "/work/one", updatedAt: 1_700_000_000_000))
+                write(root, "sessions/wd_two_222222222222/session_bbbb2222/state.json",
+                      state(createdAt: 1_600_000_000_000))
+                write(root, "sessions/wd_three_333333333333/session_cccc3333/agents/main/wire.jsonl", "x")
+
+                let cleanup = SessionCleanup(kimiCodeHome: root)
+                let plan = syncResult {
+                    try await cleanup.scan(now: now, policy: RetentionPolicy())
+                }.value
+                check("Cleanup.group.scanSucceeded", plan != nil)
+                if let plan {
+                    let byWorkspace = Dictionary(uniqueKeysWithValues: plan.groups.map { ($0.workspace, $0) })
+                    check("Cleanup.group.workspaceKeys",
+                          Set(byWorkspace.keys) == ["/work/one", "wd_two_222222222222", "wd_three_333333333333"])
+                    check("Cleanup.group.cwdPreferred",
+                          byWorkspace["/work/one"]?.items.first?.record.updatedAtMs == 1_700_000_000_000)
+                    check("Cleanup.group.createdAtFallback",
+                          byWorkspace["wd_two_222222222222"]?.items.first?.record.updatedAtMs == 1_600_000_000_000)
+                    let mtimeAge = byWorkspace["wd_three_333333333333"]?.items.first?.record.ageDays(now: now) ?? 99
+                    check("Cleanup.group.mtimeFallback", abs(mtimeAge) < 0.05)
+                    check("Cleanup.group.threeSessions", plan.totalSessionCount == 3)
+                    // 无 state.json 的 session 也要有非零体积（wire.jsonl 1 字节）。
+                    check("Cleanup.group.byteSize",
+                          byWorkspace["wd_three_333333333333"]?.items.first?.record.byteSize == 1)
+                }
+            }
+
+            // 端到端：2 个 workspace × 5 个 session + 索引（含墓碑行与坏行）+ 事件 + 账本。
+            do {
+                let root = makeRoot("e2e")
+                let alpha = "sessions/wd_alpha_111111111111"
+                let betaBucket = "wd_beta_222222222222"
+                let beta = "sessions/\(betaBucket)"
+                let alphaCwd = "/w/alpha"
+
+                let ccccState = state(cwd: alphaCwd, updatedAt: nowMs - 60_000)
+                let ddddState = state(cwd: alphaCwd, updatedAt: nowMs - 3 * dayMs)
+                let aaaaState = state(cwd: alphaCwd, updatedAt: nowMs - 10 * dayMs)
+                let bbbbState = state(cwd: alphaCwd, updatedAt: nowMs - 20 * dayMs)
+                let eeeeState = state(updatedAt: nowMs - 30 * dayMs)
+
+                write(root, "\(alpha)/session_cccc3333/state.json", ccccState)
+                writeBytes(root, "\(alpha)/session_cccc3333/agents/main/wire.jsonl", 100)
+                write(root, "\(alpha)/session_dddd4444/state.json", ddddState)
+                writeBytes(root, "\(alpha)/session_dddd4444/agents/main/wire.jsonl", 200)
+                write(root, "\(alpha)/session_aaaa1111/state.json", aaaaState)
+                writeBytes(root, "\(alpha)/session_aaaa1111/agents/main/wire.jsonl", 2048)
+                write(root, "\(alpha)/session_bbbb2222/state.json", bbbbState)
+                writeBytes(root, "\(alpha)/session_bbbb2222/agents/main/wire.jsonl", 4096)
+                write(root, "\(beta)/session_eeee5555/state.json", eeeeState)
+                writeBytes(root, "\(beta)/session_eeee5555/agents/main/wire.jsonl", 300)
+
+                // 铁律：`__global__.jsonl` 永不删；不匹配 `session_*.jsonl` 的文件永不入选。
+                write(root, "server/events/__global__.jsonl", "{}\n")
+                write(root, "server/events/session_aaaa1111.jsonl", "{}\n")
+                write(root, "server/events/session_zzzz9999.jsonl", "{}\n")
+                write(root, "server/events/notes.txt", "keep me\n")
+
+                // D7：这些一律不许碰。
+                let untouched = [
+                    "server/instances/01M38.json", "server.token", "mcp.json", "search-index/seg",
+                    "workspaces.json", "config.toml",
+                    "sessions/.index-cache/foo", "sessions/.index-dirty/foo",
+                ]
+                for rel in untouched { write(root, rel, "do not touch\n") }
+
+                let deadIndex = "{\"sessionId\":\"session_aaaa1111\",\"sessionDir\":\"\(root.path)/\(alpha)/session_aaaa1111\"}"
+                let liveIndex = "{\"sessionId\":\"session_cccc3333\",\"sessionDir\":\"\(root.path)/\(alpha)/session_cccc3333\",\"workDir\":\"\(alphaCwd)\"}"
+                let tombstone = "{\"sessionId\":\"session_ghost0000\",\"deleted\":true}"
+                let broken = "{not json"
+                // 路径形态不对（相对路径 / 非字符串）的行无法判定「该目录」是否存在 → 原样保留。
+                let relativeDir = "{\"sessionId\":\"session_aaaa1111\",\"sessionDir\":\"sessions/wd_alpha_111111111111/session_aaaa1111\"}"
+                let nullDir = "{\"sessionId\":\"session_aaaa1111\",\"sessionDir\":null}"
+                let betaIndex = "{\"sessionId\":\"session_eeee5555\",\"sessionDir\":\"\(root.path)/\(beta)/session_eeee5555\"}"
+                let originalIndex = [deadIndex, liveIndex, tombstone, broken, relativeDir, nullDir, betaIndex]
+                    .joined(separator: "\n") + "\n"
+                write(root, "session_index.jsonl", originalIndex)
+
+                let ledger = "{\"sessions\":[{\"id\":\"session_aaaa1111\",\"touchedAt\":1},{\"id\":\"session_ghost0000\",\"touchedAt\":2}]}"
+                write(root, "file-history/wd_alpha_111111111111", ledger)
+                let brokenLedger = "{\"sessions\":"
+                write(root, "file-history/wd_broken_333333333333", brokenLedger)
+
+                let cleanup = SessionCleanup(kimiCodeHome: root)
+                let policy = RetentionPolicy(keepCount: 1, retentionDays: 7)
+                let plan = syncResult { try await cleanup.scan(now: now, policy: policy) }.value
+                check("Cleanup.e2e.scanSucceeded", plan != nil)
+                if let plan {
+                    let alphaGroup = plan.groups.first { $0.workspace == alphaCwd }
+                    let betaGroup = plan.groups.first { $0.workspace == betaBucket }
+                    check("Cleanup.e2e.totalSessions", plan.totalSessionCount == 5)
+                    check("Cleanup.e2e.groupOrder", plan.groups.first?.workspace == alphaCwd)
+                    check("Cleanup.e2e.verdicts",
+                          alphaGroup?.items.map(\.verdict) == [.keepInKeepCount, .keepWithinRetentionDays, .delete, .delete])
+                    check("Cleanup.e2e.betaKeepsNewest", betaGroup?.items.map(\.verdict) == [.keepInKeepCount])
+                    check("Cleanup.e2e.deletionCount", plan.deletionCount == 2)
+                    check("Cleanup.e2e.deletionIds", plan.deletionItems.map(\.record.id) == ["session_aaaa1111", "session_bbbb2222"])
+                    check("Cleanup.e2e.byteSize",
+                          alphaGroup?.items.first { $0.record.id == "session_cccc3333" }?.record.byteSize
+                              == ccccState.utf8.count + 100)
+                    check("Cleanup.e2e.reclaimableInvariant",
+                          plan.reclaimableBytes == plan.deletionItems.reduce(0) { $0 + $1.record.byteSize })
+                    check("Cleanup.e2e.reclaimableSmallerThanTotal", plan.reclaimableBytes < plan.totalBytes)
+                    check("Cleanup.e2e.totalBytes",
+                          plan.totalBytes == plan.groups.flatMap(\.items).reduce(0) { $0 + $1.record.byteSize })
+                    check("Cleanup.e2e.oldestAge", abs(plan.oldestAgeDays - 30) < 0.001)
+                    // 扫描时 session_aaaa1111 还在 → 只有 zzzz 是孤儿。
+                    check("Cleanup.e2e.orphansAtScan",
+                          plan.orphanEventJournals.map(\.lastPathComponent) == ["session_zzzz9999.jsonl"])
+                    check("Cleanup.e2e.zombiesAtScan", plan.fileHistoryZombieIds == ["session_ghost0000"])
+
+                    let outcome = sync { await cleanup.apply(plan: plan, now: now) }
+                    check("Cleanup.e2e.failuresEmpty", outcome.failures.isEmpty)
+                    check("Cleanup.e2e.deletedSessions", outcome.deletedSessionCount == 2)
+                    check("Cleanup.e2e.reclaimed", outcome.reclaimedBytes == plan.reclaimableBytes)
+                    // 删完 session 目录后重新枚举：本次删掉的 aaaa 的 journal 也成了孤儿。
+                    check("Cleanup.e2e.deletedJournals", outcome.deletedEventJournalCount == 2)
+                    check("Cleanup.e2e.indexRemoved", outcome.indexRecordsRemoved == 1)
+                    check("Cleanup.e2e.ledgerRemoved", outcome.fileHistoryIdsRemoved == 2)
+
+                    check("Cleanup.e2e.deletedDirGone", !exists(root, "\(alpha)/session_aaaa1111"))
+                    check("Cleanup.e2e.secondDeletedDirGone", !exists(root, "\(alpha)/session_bbbb2222"))
+                    check("Cleanup.e2e.keptDirsRemain",
+                          exists(root, "\(alpha)/session_cccc3333") && exists(root, "\(alpha)/session_dddd4444")
+                              && exists(root, "\(beta)/session_eeee5555"))
+                    check("Cleanup.e2e.globalJournalKept", exists(root, "server/events/__global__.jsonl"))
+                    check("Cleanup.e2e.nonSessionFileKept", exists(root, "server/events/notes.txt"))
+                    check("Cleanup.e2e.orphanJournalsDeleted",
+                          !exists(root, "server/events/session_aaaa1111.jsonl")
+                              && !exists(root, "server/events/session_zzzz9999.jsonl"))
+
+                    // 索引：只摘掉指向已消失目录的那一行；墓碑行、坏行、路径形态不对的行逐字保留。
+                    let expectedIndex = [liveIndex, tombstone, broken, relativeDir, nullDir, betaIndex]
+                        .joined(separator: "\n") + "\n"
+                    check("Cleanup.e2e.indexPruned", readText(root, "session_index.jsonl") == expectedIndex)
+                    check("Cleanup.e2e.indexKeptTombstone",
+                          readText(root, "session_index.jsonl")?.contains(tombstone) == true)
+                    check("Cleanup.e2e.indexKeptBrokenLine",
+                          readText(root, "session_index.jsonl")?.contains(broken) == true)
+                    check("Cleanup.e2e.indexKeptNonAbsoluteDir",
+                          readText(root, "session_index.jsonl")?.contains(relativeDir) == true
+                              && readText(root, "session_index.jsonl")?.contains(nullDir) == true)
+                    check("Cleanup.e2e.indexBackupCount", backups(root).count == 1)
+                    check("Cleanup.e2e.indexBackupNotFixedName", backups(root).first != "session_index.jsonl.bak")
+                    check("Cleanup.e2e.indexBackupTimestamp",
+                          backups(root).first.map { $0.count == "session_index.jsonl.bak-".count + 14 } == true)
+                    let backupName = backups(root).first
+                    check("Cleanup.e2e.indexBackupContent",
+                          backupName.map { readText(root, $0) == originalIndex } == true)
+                    check("Cleanup.e2e.indexTmpRemoved", !exists(root, "session_index.jsonl.tmp"))
+
+                    // 账本：僵尸条目摘掉（含本次删掉的 aaaa）；坏文件原样不动。
+                    let ledgerText = readText(root, "file-history/wd_alpha_111111111111") ?? ""
+                    let ledgerJSON = (try? JSONSerialization.jsonObject(with: Data(ledgerText.utf8))) as? [String: Any]
+                    check("Cleanup.e2e.ledgerEmptied", (ledgerJSON?["sessions"] as? [Any])?.isEmpty == true)
+                    check("Cleanup.e2e.ledgerBrokenUntouched",
+                          readText(root, "file-history/wd_broken_333333333333") == brokenLedger)
+                    check("Cleanup.e2e.ledgerTmpRemoved", !exists(root, "file-history/wd_alpha_111111111111.tmp"))
+
+                    // D7 清单：全部原封不动。
+                    let untouchedSurvivors = untouched.filter { exists(root, $0) }
+                    check("Cleanup.e2e.forbiddenUntouched", untouchedSurvivors.count == untouched.count)
+                }
+            }
+
+            // 无改动 → 不写文件、不留备份、不删任何东西。
+            do {
+                let root = makeRoot("nochange")
+                let bucket = "wd_one_111111111111"
+                write(root, "sessions/\(bucket)/session_live1/state.json",
+                      state(cwd: "/w/one", updatedAt: nowMs - 3_600_000))
+                write(root, "server/events/__global__.jsonl", "{}\n")
+                write(root, "server/events/session_live1.jsonl", "{}\n")
+                let indexLine = "{\"sessionId\":\"session_live1\",\"sessionDir\":\"\(root.path)/sessions/\(bucket)/session_live1\"}"
+                let indexText = indexLine + "\n" + "{\"sessionId\":\"session_tomb\",\"deleted\":true}\n"
+                write(root, "session_index.jsonl", indexText)
+                let ledgerText = "{\"sessions\":[{\"id\":\"session_live1\",\"touchedAt\":1}]}"
+                write(root, "file-history/\(bucket)", ledgerText)
+
+                let cleanup = SessionCleanup(kimiCodeHome: root)
+                let plan = syncResult { try await cleanup.scan(now: now, policy: RetentionPolicy()) }.value
+                check("Cleanup.noChange.planEmpty", plan?.deletionCount == 0 && plan?.totalSessionCount == 1)
+                check("Cleanup.noChange.noOrphans", plan?.orphanEventJournals.isEmpty == true)
+                check("Cleanup.noChange.noZombies", plan?.fileHistoryZombieIds.isEmpty == true)
+
+                if let plan {
+                    let outcome = sync { await cleanup.apply(plan: plan, now: now) }
+                    check("Cleanup.noChange.outcomeZero",
+                          outcome.deletedSessionCount == 0 && outcome.deletedEventJournalCount == 0
+                              && outcome.reclaimedBytes == 0 && outcome.indexRecordsRemoved == 0
+                              && outcome.fileHistoryIdsRemoved == 0 && outcome.failures.isEmpty)
+                    check("Cleanup.noChange.indexUntouched", readText(root, "session_index.jsonl") == indexText)
+                    check("Cleanup.noChange.noBackup", backups(root).isEmpty)
+                    check("Cleanup.noChange.ledgerUntouched", readText(root, "file-history/\(bucket)") == ledgerText)
+                    check("Cleanup.noChange.keptSession", exists(root, "sessions/\(bucket)/session_live1"))
+                    check("Cleanup.noChange.keptJournal", exists(root, "server/events/session_live1.jsonl"))
+                }
+            }
+
+            // sessions 根目录不存在：抛出的错误能被调用方区分出来。
+            do {
+                let root = makeRoot("missing")
+                try? fm.createDirectory(at: root, withIntermediateDirectories: true)
+                let cleanup = SessionCleanup(kimiCodeHome: root.appendingPathComponent("nope", isDirectory: true))
+                let result = syncResult { try await cleanup.scan(now: now, policy: RetentionPolicy()) }
+                var missingPath: String?
+                if case .failure(let error) = result,
+                   let cleanupError = error as? SessionCleanupError,
+                   case .sessionsRootMissing(let path) = cleanupError {
+                    missingPath = path
+                }
+                check("Cleanup.missingRoot.distinguishable", missingPath?.hasSuffix("/nope/sessions") == true)
+                check("Cleanup.missingRoot.noPlan", result.value == nil)
+                check("Cleanup.missingRoot.message",
+                      missingPath.map { SessionCleanupError.sessionsRootMissing($0).message.contains($0) } == true)
+            }
+        }
+
+        // MARK: - 清理的菜单项与偏好默认值
+
+        do {
+            let items = StatusBarPresenter.renderMenu(.init(), now: now)
+            let titles = items.map(\.title)
+            let refreshIdx = titles.firstIndex(of: "立即刷新")
+            let cleanupIdx = titles.firstIndex(of: "清理 session 文件…")
+            let quitIdx = titles.firstIndex(of: "退出")
+            let cleanupItem = items.first { $0.title == "清理 session 文件…" }
+
+            check("Menu.cleanup.exists", cleanupIdx != nil)
+            check("Menu.cleanup.afterRefresh", (refreshIdx ?? -1) < (cleanupIdx ?? -1))
+            check("Menu.cleanup.beforeQuit", (cleanupIdx ?? Int.max) < (quitIdx ?? Int.min))
+            check("Menu.cleanup.enabled", cleanupItem?.enabled == true)
+            check("Menu.cleanup.noKeyEquivalent", cleanupItem?.key.isEmpty == true)
+            check("Menu.cleanup.action", cleanupItem?.action == .cleanupSessions)
+            // 独立成组：前后各一条分隔线。
+            let beforeIsSeparator = cleanupIdx.map {
+                $0 > 0 && items[$0 - 1].title.isEmpty && items[$0 - 1].action == nil && items[$0 - 1].submenu == nil
+            } ?? false
+            let afterIsSeparator = cleanupIdx.map {
+                $0 + 1 < items.count && items[$0 + 1].title.isEmpty
+                    && items[$0 + 1].action == nil && items[$0 + 1].submenu == nil
+            } ?? false
+            check("Menu.cleanup.ownGroup", beforeIsSeparator && afterIsSeparator)
+            // 每次打开菜单都重建：不依赖任何状态（空 Inputs 下也在）。
+            check("Menu.cleanup.stateIndependent",
+                  StatusBarPresenter.renderMenu(.init(configMissing: true), now: now)
+                      .map(\.title).contains("清理 session 文件…"))
+        }
+
+        do {
+            let suiteName = "kimi-companion-selfcheck-\(UUID().uuidString)"
+            guard let defaults = UserDefaults(suiteName: suiteName) else {
+                check("Settings.cleanup.suiteAvailable", false)
+                return finish(&failures)
+            }
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+
+            let store = SettingsStore(defaults: defaults)
+            check("Settings.cleanup.defaults", store.cleanupKeepCount == 3 && store.cleanupRetentionDays == 7)
+            check("Settings.cleanup.defaultConstants",
+                  SettingsStore.defaultCleanupKeepCount == 3 && SettingsStore.defaultCleanupRetentionDays == 7)
+            check("Settings.cleanup.noWriteOnInit",
+                  defaults.object(forKey: SettingsStore.cleanupKeepCountKey) == nil
+                      && defaults.object(forKey: SettingsStore.cleanupRetentionDaysKey) == nil)
+
+            store.cleanupKeepCount = 5
+            store.cleanupRetentionDays = 0
+            check("Settings.cleanup.persistsKeepCount", defaults.integer(forKey: SettingsStore.cleanupKeepCountKey) == 5)
+            // 0 是合法值（不限天数），必须与「从未设置」区分开。
+            check("Settings.cleanup.persistsZeroDays",
+                  defaults.object(forKey: SettingsStore.cleanupRetentionDaysKey) as? Int == 0)
+
+            let restored = SettingsStore(defaults: defaults)
+            check("Settings.cleanup.restores", restored.cleanupKeepCount == 5 && restored.cleanupRetentionDays == 0)
+
+            defaults.set(999, forKey: SettingsStore.cleanupKeepCountKey)
+            defaults.set(-3, forKey: SettingsStore.cleanupRetentionDaysKey)
+            let clamped = SettingsStore(defaults: defaults)
+            check("Settings.cleanup.clampsHigh", clamped.cleanupKeepCount == 20)
+            check("Settings.cleanup.clampsLow", clamped.cleanupRetentionDays == 0)
+            check("Settings.cleanup.clampHelpers",
+                  SettingsStore.clampKeepCount(0) == 1 && SettingsStore.clampKeepCount(999) == 20
+                      && SettingsStore.clampRetentionDays(-1) == 0 && SettingsStore.clampRetentionDays(999) == 365)
+            check("Settings.cleanup.ranges",
+                  SettingsStore.cleanupKeepCountRange == 1...20 && SettingsStore.cleanupRetentionDaysRange == 0...365)
+        }
+
         // MARK: - LogoCatalog / 落地资源
 
         do {

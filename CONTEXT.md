@@ -1,6 +1,6 @@
 # kimi-companion
 
-macOS 菜单栏常驻 app，展示 kimi-code desktop 所用第三方 Provider 的余额 / 配额，以及一份**合并的** token 消耗统计。
+macOS 菜单栏常驻 app，展示 kimi-code desktop 所用第三方 Provider 的余额 / 配额，以及一份**合并的** token 消耗统计；另有一项清理 Chat Session 的能力——本 app 唯一的破坏性操作，只在用户看过 Cleanup Preview 并显式确认后发生（决策见 `docs/adr/0007-session-cleanup-in-app.md`）。
 
 ## Language
 
@@ -127,3 +127,43 @@ _Avoid_: 标题、文案
 **Usage Bar**:
 percent 类型 Provider 在菜单里的用量行：窗口标签 + 轨道 + 紧贴条尾的已用百分比 + 重置倒计时；窗口状态非正常时轨道强制转红。
 _Avoid_: 进度条、柱图
+
+**Chat Session**:
+kimi-code 的一次对话在磁盘上的记录目录，位于某个 Workspace Bucket 之下；内含 `state.json`、各 agent 的 Wire Log 与该对话自己的 file-history。区别于 Caffeinate Session。
+_Avoid_: 会话、session（裸用）、对话、线程
+
+**Workspace**:
+Chat Session 的归属单位，取 `state.json` 的 `cwd`（绝对路径）；缺失时退化为 Workspace Bucket 的名字。同一 Workspace 的 Chat Session 共享一份 file-history 账本。
+_Avoid_: 工作目录、项目、仓库
+
+**Workspace Bucket**:
+`sessions/` 下的一级目录（形如 `wd_<目录名>_<hash>`），是 Chat Session 的物理容器，也是 file-history 账本的文件名。
+_Avoid_: 工作区分组、桶
+
+**Retention Policy**:
+判定一个 Chat Session 该不该被清理的规则：Keep Count、30 分钟活跃保护、Retention Days 三道门槛**全部**通过才删除。三道门槛是合取关系，不是任选其一。
+_Avoid_: 保留策略、清理规则、TTL、Retained Window
+
+**Keep Count**:
+每个 Workspace 保留的最近 Chat Session 个数（默认 3，下限 1）；排名在名额内的 Chat Session 永远不删。
+_Avoid_: 保留数、数量上限、保留份数
+
+**Retention Days**:
+只删除最后更新早于 N 天的 Chat Session（默认 7）；`0` 表示不限天数，此时唯一的时间门槛只剩 30 分钟活跃保护。
+_Avoid_: 保留天数、保留期、过期天数、Retained Window
+
+**Cleanup Plan**:
+一次扫描的完整判定结果：每个 Chat Session 的保留 / 删除结论与原因、孤儿产物清单、可回收体积；纯数据，不产生任何副作用。
+_Avoid_: 清理列表、dry-run 结果、删除清单
+
+**Cleanup Preview**:
+把 Cleanup Plan 呈现给用户并等待确认的弹窗，只列将被删除的 Chat Session；用户取消则什么都不做。删除**只能**从这里发生。
+_Avoid_: 确认框、提示、预览页
+
+**Protected Chat Session**:
+因落在 Keep Count 名额内、或 30 分钟内活跃、或未满 Retention Days 而未被判定删除的 Chat Session。
+_Avoid_: 跳过项、白名单、豁免项
+
+**Orphan Event Journal**:
+`server/events/` 下没有对应 Chat Session 的事件流文件；`__global__.jsonl` 是全局流，永远不属于此类，也永远不被清理。
+_Avoid_: 垃圾文件、残留事件、孤立日志

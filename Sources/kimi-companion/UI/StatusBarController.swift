@@ -16,6 +16,11 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
     private var cancellables: Set<AnyCancellable> = []
     private let onShowSettings: () -> Void
     private let onSelectProvider: (ProviderID) -> Void
+    private let cleanup: SessionCleanup
+    /// 每次清理前现取一次策略（偏好面板随时可改，不在 init 时快照）。
+    private let currentPolicy: () -> RetentionPolicy
+    /// 扫描 / 弹窗 / 删除期间的 in-flight 标志：再点菜单项不产生第二个弹窗。
+    private var cleanupInFlight = false
     private var caffeinateHeaderItem: NSMenuItem?
     /// 按 provider + chrome 状态缓存 `NSImage`（caffeinate 激活时缓存白色副本）。
     /// key 形如 `provider.rawValue#idle|active`，避免每 tick 重新 lockFocus 渲染。
@@ -27,6 +32,8 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
         sleepGuard: SleepGuard,
         onShowSettings: @escaping () -> Void,
         onSelectProvider: @escaping (ProviderID) -> Void = { _ in },
+        cleanup: SessionCleanup,
+        currentPolicy: @escaping () -> RetentionPolicy,
         countdownTicker: CountdownTicker = TimerCountdownTicker()
     ) {
         self.controller = controller
@@ -34,6 +41,8 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
         self.sleepGuard = sleepGuard
         self.onShowSettings = onShowSettings
         self.onSelectProvider = onSelectProvider
+        self.cleanup = cleanup
+        self.currentPolicy = currentPolicy
         self.countdownTicker = countdownTicker
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.statusItem.button?.title = "···"
@@ -250,6 +259,7 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
         case .forceRefresh: return #selector(forceRefresh)
         case .quit: return #selector(quit)
         case .showSettings: return #selector(showSettings)
+        case .cleanupSessions: return #selector(cleanupSessions)
         case .selectProvider: return #selector(selectProvider(_:))
         case .caffeinateBucket: return #selector(caffeinateBucket(_:))
         case .caffeinateCancel: return #selector(caffeinateCancel)
@@ -269,6 +279,62 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func showSettings() {
         onShowSettings()
+    }
+
+    @objc private func cleanupSessions() {
+        MainActor.assumeIsolated { startCleanup() }
+    }
+
+    /// 扫描 → 预览 → 确认后执行 → 报告 → 完整刷新一次（与「立即刷新」同路径）。
+    /// 全程由 `cleanupInFlight` 挡住重入：扫描 / 弹窗 / 删除期间再点菜单项不产生第二个弹窗。
+    @MainActor
+    private func startCleanup() {
+        guard !cleanupInFlight else { return }
+        cleanupInFlight = true
+        Task { @MainActor in
+            await runCleanup()
+            cleanupInFlight = false
+        }
+    }
+
+    @MainActor
+    private func runCleanup() async {
+        let now = Date()
+        let policy = currentPolicy()
+        let plan: CleanupPlan
+        do {
+            plan = try await cleanup.scan(now: now, policy: policy)
+        } catch let error as SessionCleanupError {
+            switch error {
+            case .sessionsRootMissing(let path):
+                CleanupAlertPresenter.present(CleanupPresenter.missingRootContent(path: path))
+            case .scanFailed:
+                CleanupAlertPresenter.present(CleanupPresenter.messageContent(error.message))
+            }
+            return
+        } catch {
+            CleanupAlertPresenter.present(CleanupPresenter.messageContent(error.localizedDescription))
+            return
+        }
+
+        let preview = CleanupPresenter.previewContent(
+            plan: plan,
+            policy: policy,
+            now: now,
+            desktopRunning: Self.isDesktopRunning()
+        )
+        guard CleanupAlertPresenter.present(preview) else { return }
+
+        let outcome = await cleanup.apply(plan: plan, now: Date())
+        CleanupAlertPresenter.present(CleanupPresenter.completionContent(outcome))
+        // 删掉的 session 会影响用量（也影响正在跑的会话），因此按「立即刷新」同路径完整刷新一次。
+        await controller.tick()
+    }
+
+    /// Kimi Code 桌面端是否在运行。按 bundle id **精确匹配**（不按名字包含匹配，
+    /// 也不读 `server/instances/*`）—— 只用来在预览里加一行警告。
+    private static func isDesktopRunning() -> Bool {
+        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.kimi.code.desktop" }
     }
 
     @objc private func selectProvider(_ sender: NSMenuItem) {

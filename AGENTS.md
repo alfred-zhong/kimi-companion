@@ -4,13 +4,14 @@
 
 ## Project Overview
 
-`kimi-companion` 是 macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 **kimi-code desktop 所用第三方 provider 的余额 / 配额**，以及一份**合并的** token 消耗统计（不区分 provider / model，ADR-0006）。每 30 / 60 / 120s 定时刷新（默认 60s）。错误降级永不空白：配置缺失、凭据缺失或网络失败时菜单栏显示 `?kimi` / `⚠︎<短标签>`，下拉菜单给出可照抄去改配置的中文说明。
+`kimi-companion` 是 macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 **kimi-code desktop 所用第三方 provider 的余额 / 配额**，以及一份**合并的** token 消耗统计（不区分 provider / model，ADR-0006）。每 30 / 60 / 120s 定时刷新（默认 60s）。错误降级永不空白：配置缺失、凭据缺失或网络失败时菜单栏显示 `?kimi` / `⚠︎<短标签>`，下拉菜单给出可照抄去改配置的中文说明。**另有一项清理 Chat Session 的能力，是本 app 唯一的破坏性操作**（ADR-0007）。
 
 - 支持 Provider：`DeepSeek`（账户余额，CNY）、`OpenCode Go`（5h / 7d / 月度三窗口配额，已用百分比）。
 - 凭据来源：**只读** `~/.kimi-code/config.toml` 的 `[providers.<段名>].api_key`（ADR-0002）。本 app 没有自己的凭据存储，不读 Keychain，不读 `api_key_env`。
 - 用量来源：`~/.kimi-code/sessions/<workspace>/<session>/agents/<agent>/wire.jsonl` 的 `usage.record` 行，**全部合并成一份**、不按 provider / model 区分（ADR-0006），进程内增量读取（ADR-0004）。
 - 菜单栏展示哪个 provider 由用户显式选择并持久化，抓取失败时**不自动切换**（ADR-0005）。
 - 有意不支持 first-party `managed:kimi-code` 账号：其 `api_key` 恒为空、走 OAuth，且本地 `oauth/usage` 端点只覆盖该账号（产品上已排除）。
+- 清理 Chat Session（ADR-0007）：菜单里 `清理 session 文件…` → 后台扫描 → Cleanup Preview → 用户点「确定」才真删（点「取消」什么都不做）→ 结果弹窗 + 完整刷新一次。机制是**直接删文件系统**，不走 kimi-code 本地 HTTP 删除接口、不 shell-out 任何外部进程。策略是**合取**（Keep Count ∧ 30 分钟活跃保护 ∧ Retention Days），参数在偏好面板。**删除不可撤销**。
 
 ## Architecture & Data Flow
 
@@ -20,14 +21,15 @@
        ├─ installMainMenu()                                ← 最小主菜单（含「编辑」），偏好窗口才能 Cmd+V
        ├─ KimiConfigSource(homeDir:)                        ← ~/.kimi-code/config.toml 只读
        │    └─ MenuBarSelection.deriveDefault(default_model) ← 首启菜单栏 provider 推导（仅此一次）
-       ├─ SettingsStore(fallbackProvider:)                  ← UserDefaults 镜像（间隔 + 选中 provider）
+       ├─ SettingsStore(fallbackProvider:)                  ← UserDefaults 镜像（间隔 + 选中 provider + 清理策略）
        ├─ WireLogReader(sessionsRoot: "~/.kimi-code/sessions")
        ├─ LiveBalanceSource(config:)                        ← 两个 provider 各独立跑一遍
        ├─ LiveDailyUsageSource(reader:)                     ← reader + HourlyAggregator
        ├─ RefreshController(balanceSource:dailySource:state:intervalSeconds:)
+       ├─ SessionCleanup(homeDirectory:)                    ← 清理 Chat Session（唯一破坏性能力，ADR-0007）
        ├─ SleepGuard(state:)                                ← IOPMAssertion 单会话守护
-       ├─ SettingsWindowController(onIntervalChange:)       ← SwiftUI 偏好面板（只有「刷新间隔」一项）
-       └─ StatusBarController(controller:state:sleepGuard:onShowSettings:onSelectProvider:)
+       ├─ SettingsWindowController(onIntervalChange:)       ← SwiftUI 偏好面板（刷新间隔 + 清理策略两项）
+       └─ StatusBarController(controller:state:sleepGuard:onShowSettings:onSelectProvider:cleanup:currentPolicy:)
             ├─ Combine 订阅 AppState @Published × 6         ← UI 主线程刷新
             └─ Timer.scheduledTimer(.common)                ← 每 N 秒 fire tick
 
@@ -36,16 +38,21 @@
       └─ MainActor.run { state.applyBalance(balanceOutcome(for:)) }   ← 逐 provider advanced(previous:incoming:now:)
   dailySource.capture(now:)   → reader.events(now:) → aggregator.aggregate(...) → (DailyUsageSnapshot, nil)
       └─ MainActor.run { applyDaily(snap:err:) }
+
+清理（点击菜单项，与 tick 无关）:
+  cleanup.scan(now:policy:) → CleanupPlan ─→ CleanupPresenter.previewContent → NSAlert 预览
+      └─ 用户「确定」→ cleanup.apply(plan:now:) → CleanupOutcome → NSAlert 结果 → controller.tick()
 ```
 
 **关键决策（必须遵守，不是历史）**
 
 - **凭据只有一个来源**：`~/.kimi-code/config.toml` 的内联 `api_key`（ADR-0002）。不新增偏好面板凭据字段、不读 Keychain、不读 `api_key_env`（不调用 `getenv`）、不读 kimi-code 本地 HTTP server（`~/.kimi-code/server/instances/*.json`、`server.token`、`mcp.json` 一律不碰）。
 - **用量是合并的一份**（ADR-0006）：所有 `usage.record` 无条件求和，不按 provider / model 分组，`model` 字段**完全不被读取**。菜单里两个 provider section 只放余额 / 配额，用量块（`今日` / `近 5h`）独立成段放在两者之后、「菜单栏显示」之前。（历史依据：`llm.request.provider` 恒为 wire 协议类型 `"openai"`，两个 provider 都是它，本来也不能用于归属。）
-- **无磁盘缓存层**：每个 tick 实时查 Provider + 增量读会话日志；Read Cursor 只在进程内（ADR-0004）。本 app 唯一的持久化是 UserDefaults（刷新间隔 + 选中 provider）。
+- **无磁盘缓存层**：每个 tick 实时查 Provider + 增量读会话日志；Read Cursor 只在进程内（ADR-0004）。本 app 唯一的持久化是 UserDefaults（刷新间隔 + 选中 provider + 清理策略）。
 - **菜单栏 provider 是显式选择**（ADR-0005）：`default_model` 推导只在首次运行用一次；此后用户选择优先；provider 失败绝不改 `selectedProvider`。
 - **不 shell-out 任何上游 CLI**。新增 Provider 仅需枚举 case + 实现 `BalanceProvider.fetch`。
 - `ProviderBalanceState.isStale` 是余额侧唯一的退化路径：失败但有旧值时保留旧值并标注。
+- **清理是唯一的破坏性能力**（ADR-0007）：只有 `清理 session 文件…` 这一条路径会写 / 删磁盘，且必须经 Cleanup Preview 显式确认。绝不碰 `server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspaces.json`、`config.toml`、`server/events/__global__.jsonl`。清理策略是合取，30 分钟活跃保护是写死的常量、不进偏好设置。
 
 ## Key Directories
 
@@ -54,7 +61,7 @@
 | `Sources/kimi-companion/` | 唯一可执行 target（`executableTarget`） |
 | ↳ `App.swift` | `@main` 入口 + DI 装配 + `--self-check` 分派 + 最小主菜单 |
 | ↳ `RefreshController.swift` | tick 编排 + `AppState`（`ObservableObject`，6 个 `@Published`） |
-| ↳ `SelfCheck.swift` | 进程级断言入口（`static run() -> Int`，419 个 `check(...)` 调用点） |
+| ↳ `SelfCheck.swift` | 进程级断言入口（`static run() -> Int`，573 个 `check(...)` 调用点） |
 | ↳ `Model/Models.swift` | 共享值类型：`ProviderID` / `MenuBarSelection` / `BalanceResult` / `QuotaWindow` / `ProviderFailure` / `ProviderCapture` / `ProviderBalanceState` / `TokenStats` / `HourBucket` / `DailyUsageSnapshot` / `CaffeinateBucket` / `CaffeinateSession` / `RefreshInterval` |
 | ↳ `Balance/Providers.swift` | `BalanceProvider` 协议 + `DeepSeekProvider` + `OpenCodeGoProvider` + `BalanceRegistry` + `normalizeBaseURL` |
 | ↳ `Balance/HTTPClient.swift` | `HTTPClient` 协议 + `URLSessionHTTPClient`（仅 HTTPS）+ `HTTPError` |
@@ -73,14 +80,17 @@
 | ↳ `SleepGuard/SessionExpiryTimer.swift` | 一次性到期驱动（`LiveSessionExpiryTimer` / `RecordingSessionExpiryTimer`） |
 | ↳ `SleepGuard/CountdownTicker.swift` | 1Hz 倒计时驱动，**只在菜单打开期间启停** |
 | ↳ `SleepGuard/CountdownFormatter.swift` | 剩余时间文案：`≥1min → Xm`、`<1min → Xs` |
-| ↳ `UI/StatusBarController.swift` | `NSStatusItem` + `NSMenu` + `Timer` + Combine sink；菜单打开时才拉起倒计时 ticker |
+| ↳ `Cleanup/SessionCleanup.swift` | 扫描 + 执行清理：`RetentionPolicy` / `ChatSessionRecord` / `CleanupVerdict` / `CleanupPlan` / `CleanupOutcome` / `SessionCleanup`；纯 Foundation，`Sendable` 值类型上的 `async` 包装（内部同步阻塞 I/O，ADR-0007） |
+| ↳ `Cleanup/CleanupPresenter.swift` | 清理的全部用户可见文案（纯函数、无 AppKit）：`humanBytes` / `previewContent` / `noDeletionDiagnostic` / `completionContent` |
+| ↳ `UI/StatusBarController.swift` | `NSStatusItem` + `NSMenu` + `Timer` + Combine sink；菜单打开时才拉起倒计时 ticker；`cleanupSessions()` 编排「扫描 → 预览 → 执行 → 结果」并带 `cleanupInFlight` 重入闸 |
 | ↳ `UI/StatusBarPresenter.swift` | 纯函数展示层：`renderTitle` / `renderChrome` / `renderMenu` + `MenuItemSpec` / `UsageBarSpec` |
 | ↳ `UI/UsageBarMenuItemView.swift` | 自绘用量进度条菜单项（轨道 + 段色填充 + 重置倒计时） |
-| ↳ `UI/SettingsWindow.swift` | `SettingsStore`（`@Published` × 镜像 UserDefaults）+ `NSHostingController<SettingsView>` |
+| ↳ `UI/CleanupAlertPresenter.swift` | `NSAlert` 接线（预览 / 结果 / 固定 220pt 可滚动等宽详情区）；LSUIElement 下弹窗前自己抢焦点 |
+| ↳ `UI/SettingsWindow.swift` | `SettingsStore`（`@Published` × 镜像 UserDefaults：间隔 / 选中 provider / 清理策略）+ `NSHostingController<SettingsView>`（刷新间隔 + 清理策略两项 `Stepper`） |
 | ↳ `Brand/LogoCatalog.swift` | `ProviderID` → `NSImage` 查表 + template 标记；未知 provider 返回 nil |
-| `Resources/Info.plist` | bundle 元数据：**`LSUIElement=true`**、`CFBundleIdentifier=com.alfred-zhong.kimi-companion`、`LSMinimumSystemVersion=13.0` |
+| `Resources/Info.plist` | bundle 元数据：**`LSUIElement=true`**、`CFBundleIdentifier=com.alfred-zhong.kimi-companion`、`LSMinimumSystemVersion=13.0`、版本 `0.2.0`（build `2`，与 `META` 同步） |
 | `Resources/provider_*.png` | 菜单栏 logo（`@2x` / `@3x` 两张，无 `.color.png` 兜底） |
-| `docs/adr/0001-0006-*.md` | 现行决策记录（0001 独立 app / 0002 凭据来自 config.toml / 0003 用量按 model 前缀归属 —— **已被 0006 取代** / 0004 wire 日志 Read Cursor / 0005 菜单栏 provider 显式 / 0006 用量合并统计） |
+| `docs/adr/0001-0007-*.md` | 现行决策记录（0001 独立 app / 0002 凭据来自 config.toml / 0003 用量按 model 前缀归属 —— **已被 0006 取代** / 0004 wire 日志 Read Cursor / 0005 菜单栏 provider 显式 / 0006 用量合并统计 / 0007 在 app 内清理 Chat Session） |
 
 ## Development Commands
 
@@ -194,12 +204,15 @@ public func tick() async {
 | `.gitignore` | `.build/`、`.swiftpm/`、`build/`、`.DS_Store`、`.idea/`、`.vscode/`、`*.swp`（不含 `Package.resolved`） |
 | `Makefile` | `all` / `build` / `run` / `test` / `clean`，全部 `.PHONY` |
 | `build.sh` | 构建 + 拼 `.app` + 复制 `Resources/*.png` + ad-hoc `codesign --force --deep --sign -` |
-| `Resources/Info.plist` | bundle id、版本 `0.1.0`（build `1`）、`LSUIElement=true` |
-| `Sources/kimi-companion/App.swift` | 进程入口，DI 在此装配 |
+| `Resources/Info.plist` | bundle id、版本 `0.2.0`（build `2`，与 `META` 同步）、`LSUIElement=true` |
+| `Sources/kimi-companion/App.swift` | 进程入口，DI 在此装配（含 `SessionCleanup` 与 `currentPolicy` 闭包） |
 | `Sources/kimi-companion/RefreshController.swift` | tick 编排 + `AppState` |
 | `Sources/kimi-companion/UI/StatusBarController.swift` | 菜单栏 + Timer + Combine |
 | `Sources/kimi-companion/UI/StatusBarPresenter.swift` | 全部「AppState → 视觉」纯函数 |
-| `docs/adr/0001-0006-*.md` | 现行决策（0001 独立 app、0002 凭据来源、0003 归属（**已被 0006 取代**）、0004 增量读取、0005 显式选择、0006 用量合并统计） |
+| `Sources/kimi-companion/Cleanup/SessionCleanup.swift` | 清理的扫描与执行（唯一破坏性能力，ADR-0007） |
+| `Sources/kimi-companion/Cleanup/CleanupPresenter.swift` | 清理的全部用户可见文案（纯函数） |
+| `Sources/kimi-companion/UI/CleanupAlertPresenter.swift` | `NSAlert` 接线 |
+| `docs/adr/0001-0007-*.md` | 现行决策（0001 独立 app、0002 凭据来源、0003 归属（**已被 0006 取代**）、0004 增量读取、0005 显式选择、0006 用量合并统计、0007 在 app 内清理 Chat Session） |
 
 ## Runtime / Tooling Preferences
 
@@ -215,9 +228,9 @@ public func tick() async {
 ## Testing & QA
 
 - **测试方式**：SwiftPM 当前 `executableTarget` 缺 XCTest / Swift Testing 模块，测试以 **`SelfCheck` 进程级断言**形式存在，由 `--self-check` 调用（`swift run kimi-companion --self-check`）。`make test` 等价同命令。
-- **断言规模**：`Sources/kimi-companion/SelfCheck.swift` 共 **419 个 `check(...)` 调用点**（`grep -c 'check('` 得 420，多出的一处是 `func check` 定义）。其中 4 处位于 4 次迭代的 logo 资源循环内，故运行期实际求值次数略多于调用点数。
+- **断言规模**：`Sources/kimi-companion/SelfCheck.swift` 共 **573 个 `check(...)` 调用点**（`grep -c 'check('` 得 574，多出的一处是 `func check` 定义）。其中 4 处位于 4 次迭代的 logo 资源循环内，故运行期实际求值次数略多于调用点数。
 - **新增断言**：在 `SelfCheck.run()` 内追加 `check("...", cond)`，纯函数 + `Bool` 条件；不要引入 XCTest。生产环境迁移 XCTest 时再移除 `SelfCheck`。
-- **覆盖范围**（自检保证）：`TokenStats` 派生（含 cache-hit 0 除法）、`CompactFormatter`（K/M/B + `999_500 → 1.0M`）、`BalanceFormatter`（CNY / USD / percent / `formatHMS` / `formatDuration` 边界）、`DeepSeekProvider` 解码与 URL（含尾斜杠 / 空白 / http 拒绝）、`OpenCodeGoProvider` 三窗口解码（all-or-nothing、percent 越界、小数秒 ISO）、`HourlyAggregator`（今日合并合计、桶边界与不变量、跨零点）、`WireLineParser`（不读 `model`、未匹配前缀照常计数、去重键）、`WireLogReader`（增量契约：首读 / 追加 / 半行 / 截断 / 替换 / 删除 / mtime 剪枝 / 窗口 / 时钟回拨均与全量重扫一致）、`RefreshController.tick` 编排（成功 / 失败 / 恢复 / stale / 配置缺失）、`StatusBarPresenter` 三个渲染函数（含「只有一份合并用量块、没有「其他」行」的菜单结构断言）、`UsageBarMenuItemView` 段色与最小条宽、`SleepGuard` 到期与取消路径、`LogoCatalog` 资源落地。
+- **覆盖范围**（自检保证）：`TokenStats` 派生（含 cache-hit 0 除法）、`CompactFormatter`（K/M/B + `999_500 → "1.0M"`）、`BalanceFormatter`（CNY / USD / percent / `formatHMS` / `formatDuration` 边界）、`DeepSeekProvider` 解码与 URL（含尾斜杠 / 空白 / http 拒绝）、`OpenCodeGoProvider` 三窗口解码（all-or-nothing、percent 越界、小数秒 ISO）、`HourlyAggregator`（今日合并合计、桶边界与不变量、跨零点）、`WireLineParser`（不读 `model`、未匹配前缀照常计数、去重键）、`WireLogReader`（增量契约：首读 / 追加 / 半行 / 截断 / 替换 / 删除 / mtime 剪枝 / 窗口 / 时钟回拨均与全量重扫一致）、`RefreshController.tick` 编排（成功 / 失败 / 恢复 / stale / 配置缺失）、`StatusBarPresenter` 三个渲染函数（含「只有一份合并用量块、没有「其他」行」的菜单结构断言）、`UsageBarMenuItemView` 段色与最小条宽、`SleepGuard` 到期与取消路径、`LogoCatalog` 资源落地、清理（合取策略四分支 / `keepCount` 夹取 / `retentionDays = 0` / 工作区分组键与 `updatedAt` 回退链 / `humanBytes` 边界 / 预览与完成文案（含 0 删除时的诊断）/ `session_index.jsonl` 修剪的墓碑行保留 / `file-history` 账本修剪 / `__global__.jsonl` 永不入选 / 菜单项位置与可用性 / 偏好默认值与夹取 / 临时目录上的 scan → apply 端到端）。
 - **退出码**：0 = 全部通过，输出 `[self-check] OK (全部通过)`；1 = 任意失败，输出 `[self-check] FAIL (N):` + 每条失败 label。
 - **发布前必跑**：
 
@@ -227,7 +240,7 @@ swift run kimi-companion --self-check   # 期望 [self-check] OK (全部通过)
 ./build.sh                              # 出 build/kimi-companion.app
 ```
 
-- **手动烟测**：`open build/kimi-companion.app` 后看菜单栏是否渲染出选中 provider 的余额 / `¥X.XX` / `X%` 与 logo；「菜单栏显示」子菜单切换 provider 是否即时生效并带 ✓；「立即刷新」是否即时重抓；偏好面板切换刷新档位是否在 ~1 个 tick 内生效；「阻止系统休眠」启动后菜单栏是否变咖啡色胶囊 + ` ☕`、倒计时是否只在菜单打开时走动。
+- **手动烟测**：`open build/kimi-companion.app` 后看菜单栏是否渲染出选中 provider 的余额 / `¥X.XX` / `X%` 与 logo；「菜单栏显示」子菜单切换 provider 是否即时生效并带 ✓；「立即刷新」是否即时重抓；偏好面板切换刷新档位是否在 ~1 个 tick 内生效；「阻止系统休眠」启动后菜单栏是否变咖啡色胶囊 + ` ☕`、倒计时是否只在菜单打开时走动；「清理 session 文件…」是否弹出预览（默认 3 / 7 在当前数据上应显示「没有可清理的 session」诊断文案）、点「取消」是否确实什么都没删、偏好面板两个 `Stepper` 是否即时生效并持久化。
 - **不要**靠 unit test 覆盖率衡量进度；当前靠 `SelfCheck` + 人工菜单栏检查。
 
 ## 提交前对照
@@ -241,4 +254,7 @@ swift run kimi-companion --self-check   # 期望 [self-check] OK (全部通过)
 7. 没有新增外部依赖（仍只有 TOMLKit）；没有引入 Conan / CocoaPods / Carthage。
 8. 新端点必须 HTTPS，且经 `normalizeBaseURL`（去尾斜杠 + 强制 https + 回退官方默认）。
 9. `SelfCheck.run()` 通过、`build.sh` 成功、`build/kimi-companion.app` ad-hoc 签名通过 `codesign -dv` 校验。
-10. `CHANGELOG.md` 已按项目规范补条目（只写新增特性 / 变更 / Bug 修复，不写常规版本迭代与依赖更新）。
+10. `CHANGELOG.md` 已按项目规范补条目（只写新增特性 / 变更 / Bug 修复，不写常规版本迭代与依赖更新）；`META` 与 `Resources/Info.plist` 的版本号同步。
+11. 破坏性能力**只有一条路径**（ADR-0007）：只有 `清理 session 文件…` 会写 / 删磁盘，且必须先经 Cleanup Preview 显式确认；没有第二条删除入口，没有跳过确认的捷径。
+12. 清理仍**不 shell-out**、不调 `getenv`、不读 kimi-code 本地 HTTP server；绝不触碰 `server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspaces.json`、`config.toml`、`server/events/__global__.jsonl`。
+13. `session_index.jsonl` 修剪仍只摘「有 `sessionDir` 字段且该目录不存在」的行；墓碑行（无 `sessionDir`）与不可解析的行原样保留；有改动才写、写前备份为 `…bak-<时间戳>`（不用会被覆盖的固定 `.bak` 名）。保留策略仍是合取，30 分钟活跃保护仍是写死的常量、不进偏好设置。

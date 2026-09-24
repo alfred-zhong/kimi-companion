@@ -26,6 +26,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     public func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
         let home = NSHomeDirectory()
+        // kimi-code 数据根目录：app 里唯一的拼接点，清理器与会话日志读取都从它派生。
+        let kimiCodeHome = SessionCleanup.dataHome(userHome: home)
 
         // config.toml 是唯一凭据来源；只在启动时读一次用于推导菜单栏默认 provider。
         let configSource = KimiConfigSource(homeDir: home)
@@ -34,7 +36,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         self.settingsStore = settings
         state.setSelectedProvider(settings.selectedProvider)
 
-        let reader = WireLogReader(sessionsRoot: "\(home)/.kimi-code/sessions")
+        let reader = WireLogReader(
+            sessionsRoot: kimiCodeHome.appendingPathComponent("sessions", isDirectory: true).path
+        )
         let balanceSource = LiveBalanceSource(config: configSource)
         let dailySource = LiveDailyUsageSource(reader: reader)
         let controller = RefreshController(
@@ -66,6 +70,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             onSelectProvider: { [weak settings, weak controller] pid in
                 settings?.selectedProvider = pid
                 controller?.selectProvider(pid)
+            },
+            cleanup: SessionCleanup(kimiCodeHome: kimiCodeHome),
+            // 清理策略每次点击时现取（偏好面板随时可改）。
+            currentPolicy: { [weak settings] in
+                RetentionPolicy(
+                    keepCount: settings?.cleanupKeepCount ?? SettingsStore.defaultCleanupKeepCount,
+                    retentionDays: settings?.cleanupRetentionDays ?? SettingsStore.defaultCleanupRetentionDays
+                )
             }
         )
         settingsCtrl.attachStatusBar(bar)

@@ -13,9 +13,28 @@ Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock �
   - `今日 · ↑输入 · ↓输出 · ⚡缓存读取 · 🎯hit%` / `近 5h · …`：**全部会话合并**的一份用量，不按 Provider 或模型区分
   - `菜单栏显示 ▸`：切换菜单栏展示的 Provider
   - `阻止系统休眠 ▸`：30 / 60 / 120 分钟 + 倒计时行 + 取消守护
-  - `偏好…` / `立即刷新` / `退出`
+  - `偏好…` / `立即刷新`
+  - `清理 session 文件…`：扫描 `~/.kimi-code` 并弹出预览，确认后删除过老的会话（见下）
+  - `退出`
 - 自动定时刷新，默认 60s，可在偏好面板调为 30 / 60 / 120s；每次刷新实时查询 Provider 并**增量**读取会话日志，无磁盘缓存。
 - 错误降级永不空白：`config.toml` 不可读 / 非法时菜单栏显示 `?kimi`；单个 Provider 缺配置、缺凭据或请求失败时显示 `⚠︎配置` / `⚠︎凭据`，下拉菜单给出可照抄去改配置的中文说明。
+
+## 清理 session 文件
+
+菜单里的 `清理 session 文件…` 是 app **唯一的破坏性操作**，机制是直接删文件系统（不走 kimi-code 的本地 HTTP 接口，也不 shell-out 任何外部进程）。点击后的流程是：后台扫描 → 弹出预览（相当于脚本的 dry-run，只列**将被删除**的会话，按工作区分组）→ 点「确定」才真删、点「取消」什么都不做 → 再弹结果，并触发一次完整刷新。
+
+保留策略是**合取**（三条全部成立才删），参数在偏好面板里：
+
+| 参数 | 默认 | 范围 | 含义 |
+|---|---|---|---|
+| 工作区保留数 | 3 | 1…20 | 每个工作区保留最近 N 个会话；**每工作区永远保留最新 1 个** |
+| 保留天数 | 7 | 0…365（`0` = 不限） | 只删除最后更新早于 N 天的会话 |
+
+另有写死的 30 分钟活跃保护（最近 30 分钟内更新过的一律不删）——它是磁盘上唯一能近似「这个会话正在被写」的信号，因此不进偏好设置。
+
+一次清理会一并处理会话的四处产物：会话目录、`server/events/session_*.jsonl` 里不对应任何现存会话的孤儿事件流、`session_index.jsonl` 里指向已消失目录的行、`file-history/<桶>` 里目录已不存在的账本条目。逐项 best-effort（一个删不掉不影响其余的，失败路径在结果弹窗里上报）。`__global__.jsonl` 永不删；`server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspaces.json`、`config.toml` 一律不碰。`session_index.jsonl` 有改动时才写，写前备份为 `session_index.jsonl.bak-<yyyyMMddHHmmss>`。
+
+**删除不可撤销**（不进废纸篓、没有 undo）。决策与取舍见 `docs/adr/0007-session-cleanup-in-app.md`。
 
 ## 支持的 Provider
 
@@ -76,7 +95,7 @@ open build/kimi-companion.app
 swift run kimi-companion --self-check
 ```
 
-输出 `[self-check] OK (全部通过)` 即表示全部断言通过（余额与配额的响应解码、格式化、用量合并口径与去重、增量读取契约、tick 状态机、菜单与状态栏渲染、休眠守护路径）。**不做任何真实网络请求**，也不触碰真实 UI。
+输出 `[self-check] OK (全部通过)` 即表示全部断言通过（余额与配额的响应解码、格式化、用量合并口径与去重、增量读取契约、tick 状态机、菜单与状态栏渲染、休眠守护路径、清理策略与产物修剪）。**不做任何真实网络请求**，也不触碰真实 UI。
 
 ## 切换菜单栏展示的 Provider
 
@@ -95,6 +114,7 @@ swift run kimi-companion --self-check
 - **仅本机 ad-hoc 签名**（`codesign --force --deep --sign -`），未做 Developer ID 公证，不适合分发。
 - **构建环境是 Command Line Tools only**：`xcodebuild` 不可用；SwiftUI 视图状态用 `ObservableObject` + `@ObservedObject`（`@State` 等宏展开的 property wrapper 在缺少 `libSwiftUIMacros.dylib` 的 CLT 环境下编不过）。
 - **日志时间戳依赖时钟**：系统时钟被回拨时，增量读取会丢弃全部游标状态并退化为一次全量重扫。
+- **清理不阻止 kimi-code 运行**：磁盘上没有可靠信号能判断一个会话是否正被打开着（`state.json` 没有 busy 字段、会话目录里没有锁文件），只能靠 30 分钟活跃保护缩小概率。检测到 Kimi Code 桌面端在运行会在预览里给一行警告，但不禁用「确定」；终端里的 CLI 检测不到。
 
 ## 架构
 
@@ -106,3 +126,4 @@ swift run kimi-companion --self-check
 - `0004-wire-log-read-cursor.md` — wire 日志的增量读取与 Read Cursor
 - `0005-menubar-provider-is-explicit.md` — 为什么菜单栏 Provider 是显式选择
 - `0006-combined-usage.md` — 为什么用量是合并的一份、不再按 Provider / model 区分
+- `0007-session-cleanup-in-app.md` — 为什么在 app 内直接删文件系统做清理，以及保留策略为何是合取
