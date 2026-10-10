@@ -135,21 +135,31 @@ public enum SelfCheck {
         check("Provider.deepseek.verbatim", ProviderID.fromModelPrefix("DeepSeek") == .deepseek)
         check("Provider.openCodeGo.verbatim", ProviderID.fromModelPrefix("OpenCode Go") == .opencodeGo)
         check("Provider.openCodeGo.rawValue", ProviderID.fromModelPrefix("opencode-go") == .opencodeGo)
+        check("Provider.kimi.verbatim", ProviderID.fromModelPrefix("Kimi") == .kimi)
+        check("Provider.kimi.rawValue", ProviderID.fromModelPrefix("kimi") == .kimi)
+        // `Moonshot` 是 Kimi 背后的开放平台名，但不是 config 段名也不是 rawValue → 不匹配任何 provider。
+        check("Provider.kimi.moonshotIsUnknown", ProviderID.fromModelPrefix("Moonshot") == .unknown)
         check("Provider.unknown", ProviderID.fromModelPrefix("agent-loop") == .unknown)
         check("Provider.empty", ProviderID.fromModelPrefix("") == .unknown)
         check("Provider.fromDefaultModel", ProviderID.fromDefaultModel("OpenCode Go/deepseek-v4.1-flash") == .opencodeGo)
         check("Provider.fromDefaultModel.deepseek", ProviderID.fromDefaultModel("DeepSeek/deepseek-flash") == .deepseek)
+        check("Provider.fromDefaultModel.kimi", ProviderID.fromDefaultModel("Kimi/k3") == .kimi)
         check("Provider.fromDefaultModel.noSlash", ProviderID.fromDefaultModel("deepseek-flash") == .unknown)
         check("Provider.fromDefaultModel.nil", ProviderID.fromDefaultModel(nil) == .unknown)
         check("Provider.sectionName.space", ProviderID.opencodeGo.configSectionName == "OpenCode Go")
         check("Provider.displayName", ProviderID.deepseek.displayName == "DeepSeek")
-        check("Provider.supportedOrder", ProviderID.supported == [.deepseek, .opencodeGo])
+        check("Provider.kimi.rawValueLiteral", ProviderID.kimi.rawValue == "kimi")
+        check("Provider.kimi.sectionName", ProviderID.kimi.configSectionName == "Kimi")
+        check("Provider.kimi.displayName", ProviderID.kimi.displayName == "Kimi")
+        check("Provider.supportedOrder", ProviderID.supported == [.deepseek, .opencodeGo, .kimi])
         check("Provider.supportedExcludesUnknown", !ProviderID.supported.contains(.unknown))
+        check("Provider.allCasesIncludesUnknown", ProviderID.allCases.contains(.unknown))
 
         // MARK: - MenuBarSelection（首启默认 provider）
 
         check("Selection.fromConfig", MenuBarSelection.deriveDefault(fromDefaultModel: "OpenCode Go/deepseek-v4.1-flash") == .opencodeGo)
         check("Selection.deepseek", MenuBarSelection.deriveDefault(fromDefaultModel: "DeepSeek/deepseek-flash") == .deepseek)
+        check("Selection.kimi", MenuBarSelection.deriveDefault(fromDefaultModel: "Kimi/k3") == .kimi)
         check("Selection.fallbackOnUnknown", MenuBarSelection.deriveDefault(fromDefaultModel: "zenmux/foo") == .deepseek)
         check("Selection.fallbackOnNil", MenuBarSelection.deriveDefault(fromDefaultModel: nil) == .deepseek)
 
@@ -166,6 +176,13 @@ public enum SelfCheck {
             check("Failure.tag.cred", ProviderFailure.credentialEmpty.statusBarTag == "凭据")
             check("Failure.tag.credEnv", ProviderFailure.credentialEnv.statusBarTag == "凭据")
             check("Failure.tag.fetchEmpty", ProviderFailure.fetch("x").statusBarTag.isEmpty)
+            // 凭据段失败：短标签同「凭据」，长文案原样透传（拼文案的一方知道候选段名）。
+            check("Failure.tag.credSection", ProviderFailure.credentialSection("x").statusBarTag == "凭据")
+            check("Failure.credSection.passthrough",
+                  ProviderFailure.credentialSection("services.moonshot_search 的 api_key 为空").menuText(provider: .kimi)
+                  == "services.moonshot_search 的 api_key 为空")
+            check("Failure.credSection.verbatimRegardlessOfProvider",
+                  ProviderFailure.credentialSection("理由").menuText(provider: .deepseek) == "理由")
         }
 
         // MARK: - HTTPError → 中文
@@ -280,6 +297,159 @@ public enum SelfCheck {
             check("OpenCode.baseURLUsed", p.id == .opencodeGo)
         }
 
+        // MARK: - Kimi 解码 / URL / 凭据预检
+
+        do {
+            // 线上真实形状：三个余额字段是**数字**，`code` 是数字 0，`status` 是真 bool。
+            let body = #"{"code":0,"data":{"available_balance":49.58894,"voucher_balance":46.58893,"cash_balance":3.00001},"scode":"0x0","status":true}"#
+            let result = try? KimiProvider.decode(Data(body.utf8))
+            check("Kimi.decode.balance", result?.balance == 49.58894)
+            check("Kimi.decode.provider", result?.provider == .kimi)
+            check("Kimi.decode.currency", result?.currency == .cny)
+            check("Kimi.decode.isAvailable", result?.isAvailable == true)
+            // 金额型 provider：没有配额窗口，也没有已用百分比。
+            check("Kimi.decode.noQuotaWindows", result?.quotaWindows == nil)
+            check("Kimi.decode.noUsedPercent", result?.usedPercent == nil)
+
+            // 字符串型数字也容忍（与 DeepSeek 同一套 `jsonDouble`）；`code` 为字符串 "0" 亦然。
+            let stringly = #"{"code":"0","data":{"available_balance":"12.5","voucher_balance":"10","cash_balance":"2.5"},"status":true}"#
+            let strResult = try? KimiProvider.decode(Data(stringly.utf8))
+            check("Kimi.decode.numericStrings", strResult?.balance == 12.5)
+            check("Kimi.decode.numericStrings.available", strResult?.isAvailable == true)
+
+            // 余额为 0 / 负数：仍是真数据，但 `isAvailable` 为 false（≤ 0 时推理调用会报额度超限）。
+            let zero = #"{"code":0,"data":{"available_balance":0,"voucher_balance":0,"cash_balance":0},"status":true}"#
+            check("Kimi.decode.zeroBalance", (try? KimiProvider.decode(Data(zero.utf8)))?.balance == 0)
+            check("Kimi.decode.zeroNotAvailable", (try? KimiProvider.decode(Data(zero.utf8)))?.isAvailable == false)
+            let negative = #"{"code":0,"data":{"available_balance":-3.5,"voucher_balance":1,"cash_balance":-4.5},"status":true}"#
+            check("Kimi.decode.negativeAvailable", (try? KimiProvider.decode(Data(negative.utf8)))?.balance == -3.5)
+            check("Kimi.decode.negativeNotAvailable", (try? KimiProvider.decode(Data(negative.utf8)))?.isAvailable == false)
+            // 负的 `cash_balance` 也照常解码（只要求可解析，不要求非负）。
+            check("Kimi.decode.negativeCashDecodes",
+                  (try? KimiProvider.decode(Data(negative.utf8)))?.currency == .cny)
+
+            // all-or-nothing：`code` / `status` / `data` / 三个余额字段任一不满足 → invalidResponse。
+            func kimiThrows(_ json: String) -> Bool {
+                syncResult { try KimiProvider.decode(Data(json.utf8)) }.failure == HTTPError.invalidResponse
+            }
+            check("Kimi.decode.codeNonZeroThrows",
+                  kimiThrows(#"{"code":1,"data":{"available_balance":1,"voucher_balance":1,"cash_balance":1},"status":true}"#))
+            check("Kimi.decode.codeMissingThrows",
+                  kimiThrows(#"{"data":{"available_balance":1,"voucher_balance":1,"cash_balance":1},"status":true}"#))
+            check("Kimi.decode.statusFalseThrows",
+                  kimiThrows(#"{"code":0,"data":{"available_balance":1,"voucher_balance":1,"cash_balance":1},"status":false}"#))
+            check("Kimi.decode.statusMissingThrows",
+                  kimiThrows(#"{"code":0,"data":{"available_balance":1,"voucher_balance":1,"cash_balance":1}}"#))
+            check("Kimi.decode.dataMissingThrows",
+                  kimiThrows(#"{"code":0,"status":true}"#))
+            check("Kimi.decode.availableMissingThrows",
+                  kimiThrows(#"{"code":0,"data":{"voucher_balance":1,"cash_balance":1},"status":true}"#))
+            check("Kimi.decode.voucherMissingThrows",
+                  kimiThrows(#"{"code":0,"data":{"available_balance":1,"cash_balance":1},"status":true}"#))
+            check("Kimi.decode.cashMissingThrows",
+                  kimiThrows(#"{"code":0,"data":{"available_balance":1,"voucher_balance":1},"status":true}"#))
+            check("Kimi.decode.availableJunkThrows",
+                  kimiThrows(#"{"code":0,"data":{"available_balance":"abc","voucher_balance":1,"cash_balance":1},"status":true}"#))
+            check("Kimi.decode.notObjectThrows", kimiThrows("[]"))
+
+            // 端点写死国内站、必须 HTTPS（`base_url` 不参与，ADR-0008）。
+            check("Kimi.url.cn", KimiProvider.balanceURL.absoluteString == "https://api.moonshot.cn/v1/users/me/balance")
+            check("Kimi.url.https", KimiProvider.balanceURL.scheme == "https")
+            check("Kimi.url.host", KimiProvider.balanceURL.host == "api.moonshot.cn")
+            check("Kimi.url.path", KimiProvider.balanceURL.path == "/v1/users/me/balance")
+            check("Kimi.credentialSectionNames",
+                  KimiProvider.credentialSectionNames == ["services.moonshot_search", "services.moonshot_fetch"])
+            check("Kimi.id", KimiProvider().id == .kimi)
+
+            // 凭据预检：段缺失 / 空 key / 只有 api_key_env 各一条可照抄的文案，可用时为 nil。
+            // 注意 entry 复刻 `KimiConfigSource.parseSections` 的归一化：空 / 全空白 api_key → nil，
+            // 因此「空 key」与「只有 api_key_env」都表现为 `apiKey == nil`，靠 `usesAPIKeyEnv` 区分。
+            func entry(_ name: String, _ key: String? = nil, env: Bool = false) -> KimiProviderEntry {
+                let trimmed = key?.trimmingCharacters(in: .whitespacesAndNewlines)
+                return KimiProviderEntry(
+                    name: name,
+                    baseURL: nil,
+                    apiKey: (trimmed?.isEmpty == false) ? trimmed : nil,
+                    usesAPIKeyEnv: env
+                )
+            }
+            func cfg(_ services: [String: KimiProviderEntry]) -> KimiConfig {
+                KimiConfig(defaultModel: nil, providers: [:], services: services)
+            }
+            let none = cfg([:])
+            check("Kimi.preflight.noSection",
+                  KimiProvider.credentialPreflight(none)
+                  == .credentialSection("config 中未找到 services.moonshot_search 或 services.moonshot_fetch 的 api_key"))
+            check("Kimi.preflight.emptyKey",
+                  KimiProvider.credentialPreflight(cfg(["moonshot_search": entry("moonshot_search", "")]))
+                  == .credentialSection("services.moonshot_search 的 api_key 为空"))
+            check("Kimi.preflight.envOnly",
+                  KimiProvider.credentialPreflight(cfg(["moonshot_search": entry("moonshot_search", nil, env: true)]))
+                  == .credentialSection("services.moonshot_search 使用 api_key_env，本 app 只读内联 api_key"))
+            check("Kimi.preflight.usable",
+                  KimiProvider.credentialPreflight(cfg(["moonshot_search": entry("moonshot_search", "sk-ms")])) == nil)
+            // 首选 `moonshot_search`；它不存在时回退 `moonshot_fetch`，文案里的段名跟着换。
+            check("Kimi.preflight.fetchFallback",
+                  KimiProvider.credentialPreflight(cfg(["moonshot_fetch": entry("moonshot_fetch", "")]))
+                  == .credentialSection("services.moonshot_fetch 的 api_key 为空"))
+            check("Kimi.preflight.fetchFallbackUsable",
+                  KimiProvider.credentialPreflight(cfg(["moonshot_fetch": entry("moonshot_fetch", "sk-f")])) == nil)
+            check("Kimi.firstSection.prefersSearch",
+                  KimiProvider.firstCredentialSection(
+                      cfg(["moonshot_search": entry("moonshot_search", "a"), "moonshot_fetch": entry("moonshot_fetch", "b")])
+                  )?.path == "services.moonshot_search")
+            check("Kimi.firstSection.fallsBackToFetch",
+                  KimiProvider.firstCredentialSection(cfg(["moonshot_fetch": entry("moonshot_fetch", "b")]))?.path
+                  == "services.moonshot_fetch")
+            check("Kimi.firstSection.none", KimiProvider.firstCredentialSection(none) == nil)
+            // 预检与 `resolveKey` 同口径：任一候选段带内联 key 就算可用 —— 第一段空着、第二段有
+            // key 时不该报凭据失败（否则「明明查得到凭据」与「预检失败」自相矛盾）。
+            check("Kimi.preflight.anyUsableSectionWins",
+                  KimiProvider.credentialPreflight(cfg([
+                      "moonshot_search": entry("moonshot_search", ""),
+                      "moonshot_fetch": entry("moonshot_fetch", "sk-f"),
+                  ])) == nil)
+            // 两段都不可用时，报**第一个存在**的那段的毛病（文案里的段名跟着换）。
+            check("Kimi.preflight.firstPresentReportedWhenNoneUsable",
+                  KimiProvider.credentialPreflight(cfg([
+                      "moonshot_search": entry("moonshot_search", nil, env: true),
+                      "moonshot_fetch": entry("moonshot_fetch", ""),
+                  ])) == .credentialSection("services.moonshot_search 使用 api_key_env，本 app 只读内联 api_key"))
+
+            // resolveKey：经 `TomlCredentialSource` 逐候选取第一把可用 key。
+            let kimiCfg = cfg(["moonshot_fetch": entry("moonshot_fetch", "sk-fetch")])
+            check("Kimi.resolveKey.tomlSource", KimiProvider.resolveKey(creds: TomlCredentialSource(config: kimiCfg)) == "sk-fetch")
+            check("Kimi.resolveKey.none", KimiProvider.resolveKey(creds: TomlCredentialSource(config: none)) == nil)
+            check("Kimi.hasCredential.servicesPath",
+                  KimiProvider().hasCredential(creds: MapCredentialSource(values: ["services.moonshot_search": "sk-ms"])))
+            check("Kimi.hasCredential.fetchPath",
+                  KimiProvider().hasCredential(creds: MapCredentialSource(values: ["services.moonshot_fetch": "sk-f"])))
+            check("Kimi.hasCredential.none", !KimiProvider().hasCredential(creds: MapCredentialSource()))
+        }
+
+        // MARK: - BalanceRegistry 路由
+
+        do {
+            // `Kimi` 刻意忽略 `base_url`：即使 config 里写了个假地址也不改端点（ADR-0008）。
+            let cfg = KimiConfig(
+                defaultModel: nil,
+                providers: ["Kimi": KimiProviderEntry(
+                    name: "Kimi", baseURL: "https://bogus.example.com/v9", apiKey: "k", usesAPIKeyEnv: false
+                )],
+                services: [:]
+            )
+            let kimi = BalanceRegistry.provider(for: .kimi, config: cfg)
+            check("Registry.kimi.isKimiProvider", kimi is KimiProvider)
+            check("Registry.kimi.id", kimi?.id == .kimi)
+            check("Registry.kimi.ignoresBaseURL",
+                  KimiProvider.balanceURL.absoluteString == "https://api.moonshot.cn/v1/users/me/balance")
+            check("Registry.deepseek.readsBaseURL",
+                  (BalanceRegistry.provider(for: .deepseek, config: cfg) as? DeepSeekProvider)?.baseURL == nil)
+            check("Registry.unknown.nil", BalanceRegistry.provider(for: .unknown, config: cfg) == nil)
+            check("Registry.all.count", BalanceRegistry.all(config: cfg).count == 3)
+            check("Registry.all.order", BalanceRegistry.all(config: cfg).map(\.id) == [.deepseek, .opencodeGo, .kimi])
+        }
+
         // MARK: - Provider fetch（请求头 / 走 fake HTTP）
 
         do {
@@ -297,6 +467,32 @@ public enum SelfCheck {
             _ = syncResult { try await oc.fetch(creds: MapCredentialSource(values: ["OpenCode Go": "oc_test"]), http: ocHTTP) }
             check("Fetch.opencode.urlNoTrailingSlash", ocHTTP.requestedURLs == ["https://opencode.ai/zen/go/v1/usage"])
             check("Fetch.opencode.auth", ocHTTP.requestedHeaders["Authorization"] == "Bearer oc_test")
+
+            // Kimi：端点写死国内站（不看 base_url），凭据走 `services.<段名>` 路径。
+            let kimiHTTP = RecordingHTTP()
+            kimiHTTP.body = #"{"code":0,"data":{"available_balance":49.58894,"voucher_balance":46.58893,"cash_balance":3.00001},"status":true}"#
+            let kimiResult = syncResult {
+                try await KimiProvider().fetch(creds: MapCredentialSource(values: ["services.moonshot_search": "sk-ms"]), http: kimiHTTP)
+            }
+            check("Fetch.kimi.ok", kimiResult.value?.balance == 49.58894)
+            check("Fetch.kimi.currency", kimiResult.value?.currency == .cny)
+            check("Fetch.kimi.url", kimiHTTP.requestedURLs == ["https://api.moonshot.cn/v1/users/me/balance"])
+            check("Fetch.kimi.auth", kimiHTTP.requestedHeaders["Authorization"] == "Bearer sk-ms")
+
+            // `moonshot_search` 缺席时回退到 `moonshot_fetch`。
+            let kimiFetchHTTP = RecordingHTTP()
+            kimiFetchHTTP.body = kimiHTTP.body
+            _ = syncResult {
+                try await KimiProvider().fetch(creds: MapCredentialSource(values: ["services.moonshot_fetch": "sk-f"]), http: kimiFetchHTTP)
+            }
+            check("Fetch.kimi.fetchFallbackAuth", kimiFetchHTTP.requestedHeaders["Authorization"] == "Bearer sk-f")
+            check("Fetch.kimi.fetchFallbackRequested", kimiFetchHTTP.calls == 1)
+
+            // Kimi 无凭据：不发请求。
+            let kimiNoCred = RecordingHTTP()
+            let kimiThrown = syncResult { try await KimiProvider().fetch(creds: MapCredentialSource(), http: kimiNoCred) }
+            check("Fetch.kimi.noCredential.throws", kimiThrown.failure == HTTPError.missingCredential)
+            check("Fetch.kimi.noCredential.noRequest", kimiNoCred.calls == 0)
 
             // 无凭据：不发请求。
             let noCredHTTP = RecordingHTTP()
@@ -340,6 +536,16 @@ public enum SelfCheck {
             type = "openai"
             api_key = "oc_sk_a#b_0123456789"
             custom_headers = { x-opencode-session = "4DD877B9-056A-4015-A1F2-421430DAA7D3" }
+
+            [services.moonshot_search]
+            type = "openai"
+            base_url = "https://api.moonshot.cn/v1"
+            api_key = "sk-moonshot-search"
+
+            [services.moonshot_fetch]
+            type = "openai"
+            base_url = "https://api.moonshot.cn/v1"
+            api_key = "sk-moonshot-fetch"
             """
             let source = KimiConfigSource(configPath: write("real.toml", real))
             guard case .loaded(let cfg) = source.load() else {
@@ -360,15 +566,52 @@ public enum SelfCheck {
             check("Config.emptyAPIKeyIsNil", cfg.provider("managed:kimi-code")?.apiKey == nil)
             // 不存在的段。
             check("Config.missingSection", cfg.provider("MiniMax") == nil)
-            check("Config.missingSectionGuard", ProviderID.supported.allSatisfy { cfg.provider($0.configSectionName) != nil })
+            // `Kimi` 没有 `[providers.Kimi]` 段（凭据来自 `[services.moonshot_*]`，ADR-0008），
+            // 因此「supported 每个都有 provider 段」这条守卫只对读 provider 段的两个成立。
+            check("Config.missingSectionGuard",
+                  [ProviderID.deepseek, .opencodeGo].allSatisfy { cfg.provider($0.configSectionName) != nil })
+            check("Config.kimiHasNoProviderSection", cfg.provider(ProviderID.kimi.configSectionName) == nil)
             // 未使用 api_key_env。
             check("Config.noEnvKey", cfg.provider("DeepSeek")?.usesAPIKeyEnv == false)
 
-            // CredentialSource 只认内联 api_key。
+            // `[services.*]` 段：只作 `Kimi` 的凭据来源，不参与 provider 路由。
+            check("Config.serviceKeys", Set(cfg.services.keys) == ["moonshot_search", "moonshot_fetch"])
+            check("Config.serviceLookup", cfg.service("moonshot_search")?.apiKey == "sk-moonshot-search")
+            check("Config.serviceBaseURL", cfg.service("moonshot_fetch")?.baseURL == "https://api.moonshot.cn/v1")
+            check("Config.serviceMissing", cfg.service("nope") == nil)
+            check("Config.servicesNotInProviders", cfg.provider("moonshot_search") == nil)
+
+            // 凭据路径：裸段名 → provider 段；`services.<段名>` → services 段。
+            check("Config.credentialSection.servicesPath",
+                  cfg.credentialSection("services.moonshot_search")?.apiKey == "sk-moonshot-search")
+            check("Config.credentialSection.bareProvider",
+                  cfg.credentialSection("DeepSeek")?.apiKey?.count == 35)
+            check("Config.credentialSection.missingServicesPath", cfg.credentialSection("services.nope") == nil)
+            check("Config.credentialSection.bareServiceNameNotRouted", cfg.credentialSection("moonshot_search") == nil)
+            check("Config.credentialSection.unknownBareName", cfg.credentialSection("MiniMax") == nil)
+
+            // CredentialSource 只认内联 api_key（两种凭据路径都认）。
             let creds = TomlCredentialSource(config: cfg)
             check("Creds.resolve", creds.resolve("OpenCode Go") == "oc_sk_a#b_0123456789")
             check("Creds.resolveEmpty", creds.resolve("managed:kimi-code") == nil)
             check("Creds.resolveMissing", creds.resolve("MiniMax") == nil)
+            check("Creds.resolveServicesPath", creds.resolve("services.moonshot_search") == "sk-moonshot-search")
+            check("Creds.resolveBareServiceNameNil", creds.resolve("moonshot_search") == nil)
+
+            // 段名本身含 `.` 的 provider 优先于 services 路径解析（先查 provider 段再解析点号）。
+            let dotsToml = """
+            [providers."a.b"]
+            api_key = "sk-provider-dot"
+
+            [services.b]
+            api_key = "sk-service-b"
+            """
+            let dotsCfg = KimiConfigSource(configPath: write("dots.toml", dotsToml)).load().config
+            check("Config.dotPrecedence.providerWins", dotsCfg?.credentialSection("a.b")?.apiKey == "sk-provider-dot")
+            check("Config.dotPrecedence.servicesStillReachable", dotsCfg?.credentialSection("services.b")?.apiKey == "sk-service-b")
+            check("Config.dotPrecedence.bareBIsNil", dotsCfg?.credentialSection("b") == nil)
+            check("Config.dotPrecedence.keysSeparated",
+                  dotsCfg?.providers.keys.contains("a.b") == true && dotsCfg?.services.keys.contains("b") == true)
 
             // api_key_env 段：凭据不可解析（不调用 getenv）。
             let envToml = """
@@ -390,9 +633,21 @@ public enum SelfCheck {
             let blankCfg = KimiConfigSource(configPath: write("blank.toml", blankToml)).load().config
             check("Config.blankKeyIsNil", blankCfg?.provider("DeepSeek")?.apiKey == nil)
 
+            // services 段与 providers 段共用同一套解析规则：空 / 全空白 api_key → nil。
+            let blankServiceToml = """
+            [services.moonshot_search]
+            api_key = "   "
+            """
+            let blankServiceCfg = KimiConfigSource(configPath: write("blank-service.toml", blankServiceToml)).load().config
+            check("Config.serviceBlankKeyIsNil", blankServiceCfg?.service("moonshot_search")?.apiKey == nil)
+            check("Config.serviceBlankKeyPreflight",
+                  blankServiceCfg.flatMap(KimiProvider.credentialPreflight)
+                  == .credentialSection("services.moonshot_search 的 api_key 为空"))
+
             // 无 providers 段 / 空文件：仍可加载，只是没有条目。
             let bareCfg = KimiConfigSource(configPath: write("bare.toml", "default_model = \"DeepSeek/x\"\n")).load().config
             check("Config.noProvidersTable", bareCfg?.providers.isEmpty == true)
+            check("Config.noServicesTable", bareCfg?.services.isEmpty == true)
             check("Config.noProvidersTable.defaultModel", bareCfg?.defaultModel == "DeepSeek/x")
 
             // 非法 TOML / 不存在的文件。
@@ -428,10 +683,13 @@ public enum SelfCheck {
             [providers."OpenCode Go"]
             base_url = "https://opencode.ai/zen/go/v1"
             api_key = "\(goodKey)"
+
+            [services.moonshot_search]
+            api_key = "\(goodKey)"
             """
             try? Data(both.utf8).write(to: URL(fileURLWithPath: configPath))
 
-            // 两个都成功。
+            // 三个都成功。
             final class ScriptedHTTP: HTTPClient, @unchecked Sendable {
                 var urls: [String] = []
                 var statusByHost: [String: Int] = [:]
@@ -451,26 +709,39 @@ public enum SelfCheck {
             let http = ScriptedHTTP()
             http.bodyByPath["/user/balance"] = #"{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"65.92"}]}"#
             http.bodyByPath["/zen/go/v1/usage"] = #"{"usage":{"rolling":{"status":"ok","percent":16,"resetsAt":"2026-09-22T11:17:56Z"},"weekly":{"status":"ok","percent":22,"resetsAt":"2026-09-28T00:00:00Z"},"monthly":{"status":"ok","percent":13,"resetsAt":"2026-10-19T00:00:00Z"}}}"#
+            http.bodyByPath["/v1/users/me/balance"] = #"{"code":0,"data":{"available_balance":49.58894,"voucher_balance":46.58893,"cash_balance":3.00001},"status":true}"#
 
             let source = LiveBalanceSource(config: KimiConfigSource(configPath: configPath), http: http)
             let capture = sync { await source.capture(now: now) }
-            check("Source.bothSucceed.count", capture.perProvider.count == 2)
+            // `ProviderID.supported` 每个都有键：即使某个 provider 失败，事实也照记。
+            check("Source.perProvider.count", capture.perProvider.count == 3)
             check("Source.deepseek.value", capture.capture(for: .deepseek).result?.balance == 65.92)
             check("Source.opencode.value", capture.capture(for: .opencodeGo).result?.usedPercent == 16)
+            check("Source.kimi.value", capture.capture(for: .kimi).result?.balance == 49.58894)
+            check("Source.kimi.currency", capture.capture(for: .kimi).result?.currency == .cny)
+            check("Source.kimi.noFailure", capture.capture(for: .kimi).failure == nil)
             check("Source.notConfigMissing", capture.configMissing == false)
             check("Source.defaultModel", capture.defaultModel == "OpenCode Go/deepseek-v4.1-flash")
-            check("Source.usedConfigBaseURL", Set(http.urls) == ["https://api.deepseek.com/user/balance", "https://opencode.ai/zen/go/v1/usage"])
+            // 三个 provider 各自打了自己的端点：DeepSeek / OpenCode Go 读 config 的 base_url，Kimi 写死国内站。
+            check("Source.usedConfigBaseURL", Set(http.urls) == [
+                "https://api.deepseek.com/user/balance",
+                "https://opencode.ai/zen/go/v1/usage",
+                "https://api.moonshot.cn/v1/users/me/balance",
+            ])
 
-            // 只让 OpenCode Go 失败：DeepSeek 必须不受影响。
+            // 只让 OpenCode Go 失败：另两个必须不受影响。
             http.statusByHost["opencode.ai"] = 401
             let partial = sync { await source.capture(now: now) }
             check("Source.independent.deepseekStillOK", partial.capture(for: .deepseek).result?.balance == 65.92)
+            check("Source.independent.kimiStillOK", partial.capture(for: .kimi).result?.balance == 49.58894)
             check("Source.independent.opencodeFailed", partial.capture(for: .opencodeGo).result == nil)
             check("Source.independent.opencodeReason",
                   partial.capture(for: .opencodeGo).failure == .fetch("鉴权失败 (401)"))
             check("Source.independent.deepseekNoFailure", partial.capture(for: .deepseek).failure == nil)
 
-            // 段缺失：只有该 provider 报 providerMissing。
+            // 段缺失：只有该 provider 报 providerMissing；`Kimi` 没有 provider 段可查，
+            // 报的是「服务段缺失」（ADR-0008）。
+            let kimiNoSectionText = "config 中未找到 services.moonshot_search 或 services.moonshot_fetch 的 api_key"
             let onlyDeepSeek = """
             [providers.DeepSeek]
             api_key = "\(goodKey)"
@@ -480,6 +751,7 @@ public enum SelfCheck {
             let missing = sync { await source.capture(now: now) }
             check("Source.sectionMissing.deepseekOK", missing.capture(for: .deepseek).result?.balance == 65.92)
             check("Source.sectionMissing.opencode", missing.capture(for: .opencodeGo).failure == .providerMissing)
+            check("Source.sectionMissing.kimi", missing.capture(for: .kimi).failure == .credentialSection(kimiNoSectionText))
 
             // 空 api_key。
             let emptyKey = """
@@ -493,6 +765,7 @@ public enum SelfCheck {
             let empty = sync { await source.capture(now: now) }
             check("Source.emptyKey.deepseek", empty.capture(for: .deepseek).failure == .credentialEmpty)
             check("Source.emptyKey.opencode", empty.capture(for: .opencodeGo).failure == .credentialEmpty)
+            check("Source.emptyKey.kimi", empty.capture(for: .kimi).failure == .credentialSection(kimiNoSectionText))
 
             // api_key_env：凭据不可解析，且明确与「空」区分。
             let envKey = """
@@ -506,13 +779,60 @@ public enum SelfCheck {
             let envCapture = sync { await source.capture(now: now) }
             check("Source.envKey.deepseek", envCapture.capture(for: .deepseek).failure == .credentialEnv)
             check("Source.envKey.opencodeOK", envCapture.capture(for: .opencodeGo).result != nil)
+            check("Source.envKey.kimi", envCapture.capture(for: .kimi).failure == .credentialSection(kimiNoSectionText))
 
-            // config.toml 不可读 → 全局降级，两个都带 configUnreadable。
+            // Kimi 凭据段三种不可用形态：文案里的段名跟着首选段走，另两个 provider 不受牵连。
+            let kimiEmptyKey = """
+            [providers.DeepSeek]
+            api_key = "\(goodKey)"
+
+            [providers."OpenCode Go"]
+            api_key = "\(goodKey)"
+
+            [services.moonshot_search]
+            api_key = ""
+            """
+            try? Data(kimiEmptyKey.utf8).write(to: URL(fileURLWithPath: configPath))
+            let kimiEmpty = sync { await source.capture(now: now) }
+            check("Source.kimi.emptyKey",
+                  kimiEmpty.capture(for: .kimi).failure == .credentialSection("services.moonshot_search 的 api_key 为空"))
+            check("Source.kimi.emptyKey.doesNotDisturbOthers",
+                  kimiEmpty.capture(for: .deepseek).result?.balance == 65.92
+                      && kimiEmpty.capture(for: .opencodeGo).result?.usedPercent == 16)
+
+            let kimiEnvOnly = """
+            [providers.DeepSeek]
+            api_key = "\(goodKey)"
+
+            [services.moonshot_search]
+            api_key_env = "MOONSHOT_API_KEY"
+            """
+            try? Data(kimiEnvOnly.utf8).write(to: URL(fileURLWithPath: configPath))
+            let kimiEnv = sync { await source.capture(now: now) }
+            check("Source.kimi.envOnly",
+                  kimiEnv.capture(for: .kimi).failure
+                  == .credentialSection("services.moonshot_search 使用 api_key_env，本 app 只读内联 api_key"))
+            check("Source.kimi.envOnly.deepseekUnaffected", kimiEnv.capture(for: .deepseek).result?.balance == 65.92)
+
+            // 首选段缺席 → 回退 `moonshot_fetch`，Kimi 照常成功；另两个缺段也不影响它。
+            let kimiFetchOnly = """
+            [services.moonshot_fetch]
+            api_key = "\(goodKey)"
+            """
+            try? Data(kimiFetchOnly.utf8).write(to: URL(fileURLWithPath: configPath))
+            let kimiOnly = sync { await source.capture(now: now) }
+            check("Source.kimi.fetchFallbackSucceeds", kimiOnly.capture(for: .kimi).result?.balance == 49.58894)
+            check("Source.kimi.fetchFallbackOthersMissing",
+                  kimiOnly.capture(for: .deepseek).failure == .providerMissing
+                      && kimiOnly.capture(for: .opencodeGo).failure == .providerMissing)
+
+            // config.toml 不可读 → 全局降级，每个都带 configUnreadable。
             let missingConfig = LiveBalanceSource(config: KimiConfigSource(configPath: "\(root.path)/gone.toml"), http: http)
             let unreadable = sync { await missingConfig.capture(now: now) }
             check("Source.configMissing.flag", unreadable.configMissing == true)
             check("Source.configMissing.deepseek", unreadable.capture(for: .deepseek).failure?.statusBarTag == "配置")
             check("Source.configMissing.opencode", unreadable.capture(for: .opencodeGo).failure?.statusBarTag == "配置")
+            check("Source.configMissing.kimi", unreadable.capture(for: .kimi).failure?.statusBarTag == "配置")
             check("Source.configMissing.noHTTP", unreadable.capture(for: .deepseek).result == nil)
         }
 
@@ -888,6 +1208,19 @@ public enum SelfCheck {
             check("Title.opencode.percent", StatusBarPresenter.renderTitle(ocSelected).string == "\u{2009}\u{2009}16%")
             check("Title.opencode.noLabel", !StatusBarPresenter.renderTitle(ocSelected).string.contains("5h"))
 
+            // 3b) 选中 Kimi：CNY 2 位小数（与 DeepSeek 同形）；凭据段失败 → ⚠︎凭据。
+            let kimiOK = BalanceResult(provider: .kimi, balance: 49.58894, currency: .cny, isAvailable: true)
+            let kimiState = ProviderBalanceState(provider: .kimi, result: kimiOK, capturedAt: now)
+            check("Title.kimi", StatusBarPresenter.renderTitle(.init(selectedProvider: .kimi, balances: [.kimi: kimiState])).string
+                == "\u{2009}\u{2009}¥49.59")
+            let kimiFailed = ProviderBalanceState(
+                provider: .kimi,
+                failure: .credentialSection("config 中未找到 services.moonshot_search 或 services.moonshot_fetch 的 api_key")
+            )
+            check("Title.kimi.credentialFailure",
+                  StatusBarPresenter.renderTitle(.init(selectedProvider: .kimi, balances: [.kimi: kimiFailed])).string
+                  == "\u{2009}\u{2009}⚠︎凭据")
+
             // 4) 选中 provider 失败且无旧值 → ⚠︎ + 短标签。**绝不切到另一个 provider。**
             let dsFailed = ProviderBalanceState(provider: .deepseek, failure: .credentialEmpty)
             let failedInputs = StatusBarPresenter.Inputs(selectedProvider: .deepseek, balances: [.deepseek: dsFailed, .opencodeGo: ocState])
@@ -964,27 +1297,45 @@ public enum SelfCheck {
                 capturedAt: now
             )
 
+            let kimiOK = BalanceResult(provider: .kimi, balance: 49.58894, currency: .cny, isAvailable: true)
             let inputs = StatusBarPresenter.Inputs(
                 selectedProvider: .deepseek,
                 balances: [
                     .deepseek: ProviderBalanceState(provider: .deepseek, result: dsOK, capturedAt: now),
                     .opencodeGo: ProviderBalanceState(provider: .opencodeGo, result: ocOK, capturedAt: now),
+                    .kimi: ProviderBalanceState(provider: .kimi, result: kimiOK, capturedAt: now),
                 ],
                 daily: daily
             )
             let items = StatusBarPresenter.renderMenu(inputs, now: now)
             let titles = items.map(\.title)
 
-            // 两个 provider 永远都在，顺序固定，header 只有 provider 名（不追加模型名）。
+            // 三个 provider 永远都在，顺序固定（= `ProviderID.supported`），header 只有 provider 名（不追加模型名）。
+            let providerHeaders = ProviderID.supported.map(\.displayName)
             check("Menu.order.deepseekFirst", titles.first == "DeepSeek")
+            check("Menu.order.threeProviderSections",
+                  titles.filter { providerHeaders.contains($0) } == ["DeepSeek", "OpenCode Go", "Kimi"])
             check("Menu.hasOpenCodeGo", titles.contains("OpenCode Go"))
-            check("Menu.headerOnlyProviderName", titles.firstIndex(of: "DeepSeek")! < titles.firstIndex(of: "OpenCode Go")!)
-            check("Menu.headerNoModel", !titles.contains { $0.hasPrefix("DeepSeek (") || $0.hasPrefix("OpenCode Go (") })
-            check("Menu.hasBothProvidersEvenIfOneMissing",
-                  Array(StatusBarPresenter.renderMenu(.init()).map(\.title).filter { $0 == "DeepSeek" || $0 == "OpenCode Go" }) == ["DeepSeek", "OpenCode Go"])
+            check("Menu.hasKimi", titles.contains("Kimi"))
+            check("Menu.headerOnlyProviderName",
+                  titles.firstIndex(of: "DeepSeek")! < titles.firstIndex(of: "OpenCode Go")!
+                      && titles.firstIndex(of: "OpenCode Go")! < titles.firstIndex(of: "Kimi")!)
+            check("Menu.headerNoModel", !titles.contains { title in
+                providerHeaders.contains { title.hasPrefix("\($0) (") }
+            })
+            check("Menu.hasAllProvidersEvenIfNothingCaptured",
+                  StatusBarPresenter.renderMenu(.init()).map(\.title).filter { providerHeaders.contains($0) }
+                  == ["DeepSeek", "OpenCode Go", "Kimi"])
 
-            // DeepSeek 余额行。
+            // DeepSeek / Kimi 各一行余额（金额型），后者紧跟自己的 header。
             check("Menu.deepseek.balanceLine", titles.contains("余额 ¥65.92"))
+            check("Menu.kimi.balanceLine", titles.contains("余额 ¥49.59"))
+            if let kimiIdx = titles.firstIndex(of: "Kimi") {
+                check("Menu.kimi.balanceLineFollowsHeader", titles[kimiIdx + 1] == "余额 ¥49.59")
+                check("Menu.kimi.noBarRow", items[kimiIdx + 1].usageBar == nil)
+            } else {
+                check("Menu.kimi.sectionLocated", false)
+            }
             // OpenCode Go 三窗口进度条（顺序与标签固定）。
             let bars = items.compactMap(\.usageBar)
             check("Menu.opencode.barCount", bars.count == 3)
@@ -996,7 +1347,7 @@ public enum SelfCheck {
                 "3h15m 后重置", "5d3h 后重置", "26d 后重置",
             ])
 
-            // 用量：只有一份合并块，位于两个 provider section 之后、「菜单栏显示」之前。
+            // 用量：只有一份合并块，位于**全部** provider section 之后、「菜单栏显示」之前。
             let todayRow = "今日 · ↑18.9K · ↓187 · ⚡145.0K · 🎯88%"
             let last5hRow = "近 5h · ↑1.0K · ↓20 · ⚡4.0K · 🎯80%"
             check("Menu.usage.todayRow", titles.contains(todayRow))
@@ -1010,9 +1361,9 @@ public enum SelfCheck {
             check("Menu.usage.noOtherRow", !titles.contains { $0.contains("其他") })
             check("Menu.usage.noUnmatchedBucketRow", !titles.contains { $0.hasPrefix("其他 ·") })
             if let todayIdx = titles.firstIndex(of: todayRow),
-               let ocIdx = titles.firstIndex(of: "OpenCode Go"),
+               let lastProviderIdx = titles.firstIndex(of: "Kimi"),
                let barIdx = titles.firstIndex(of: "菜单栏显示") {
-                check("Menu.usage.afterBothProviderSections", todayIdx > ocIdx)
+                check("Menu.usage.afterAllProviderSections", todayIdx > lastProviderIdx)
                 check("Menu.usage.beforeMenuBarSelection", todayIdx < barIdx)
                 check("Menu.usage.last5hDirectlyAfterToday", titles[todayIdx + 1] == last5hRow)
                 // 用量块之后再没有进度条行 —— 用量行确实脱离了 provider section。
@@ -1096,13 +1447,14 @@ public enum SelfCheck {
             let normalTrailings = ["4h17m 后重置", "5d3h 后重置", "26d 后重置"].map(UsageBarMenuItemView.trailingWidth(for:))
             check("Menu.bar.normalRowsShareFloor", normalTrailings.allSatisfy { $0 == UsageBarMenuItemView.minTrailingRegionWidth })
 
-            // 失败状态：每个 provider 自己的中文文案出现在自己的 section 里。
+            // 失败状态：每个 provider 自己的中文文案出现在自己的 section 里；三者互不牵连。
             let mixed = StatusBarPresenter.renderMenu(
                 .init(
                     selectedProvider: .opencodeGo,
                     balances: [
                         .deepseek: ProviderBalanceState(provider: .deepseek, result: dsOK),
                         .opencodeGo: ProviderBalanceState(provider: .opencodeGo, failure: .providerMissing),
+                        .kimi: ProviderBalanceState(provider: .kimi, failure: .credentialSection("services.moonshot_search 的 api_key 为空")),
                     ],
                     daily: daily
                 ),
@@ -1111,8 +1463,10 @@ public enum SelfCheck {
             let mixedTitles = mixed.map(\.title)
             check("Menu.independent.deepseekStillShown", mixedTitles.contains("余额 ¥65.92"))
             check("Menu.independent.opencodeError", mixedTitles.contains("config 中未找到 provider \"OpenCode Go\""))
+            check("Menu.independent.kimiError", mixedTitles.contains("services.moonshot_search 的 api_key 为空"))
             check("Menu.independent.order", (mixedTitles.firstIndex(of: "config 中未找到 provider \"OpenCode Go\"") ?? 0)
                 > (mixedTitles.firstIndex(of: "DeepSeek") ?? 0))
+            // 失败的 provider 显示自己的原因，不会退化成「尚未采集」占位。
             check("Menu.independent.noPlaceholderWhenFailed",
                   mixedTitles.filter { $0 == "余额: ···" }.count == 0)
 
@@ -1134,20 +1488,24 @@ public enum SelfCheck {
             check("Menu.stale.keepsValue", stale.contains("余额 ¥65.92"))
             check("Menu.stale.labelsOldValue", stale.contains("⚠ 旧值 · 请求超时 (10 秒)"))
 
-            // 「菜单栏显示 ▸」子菜单：两个 radio 项，选中带 ✓。
+            // 「菜单栏显示 ▸」子菜单：每个受支持 provider 一个 radio 项，选中带 ✓。
             guard let displayIdx = items.firstIndex(where: { $0.title == "菜单栏显示" }),
                   let displaySub = items[displayIdx].submenu else {
                 check("Menu.menuBarSelection.exists", false)
                 return finish(&failures)
             }
             check("Menu.menuBarSelection.exists", true)
-            check("Menu.menuBarSelection.count", displaySub.count == 2)
-            check("Menu.menuBarSelection.titles", displaySub.map(\.title) == ["DeepSeek ✓", "OpenCode Go"])
+            check("Menu.menuBarSelection.count", displaySub.count == 3)
+            check("Menu.menuBarSelection.titles", displaySub.map(\.title) == ["DeepSeek ✓", "OpenCode Go", "Kimi"])
             check("Menu.menuBarSelection.actions", displaySub.allSatisfy { $0.action == .selectProvider })
-            check("Menu.menuBarSelection.represented", displaySub.map(\.representedProvider) == ["deepseek", "opencode-go"])
+            check("Menu.menuBarSelection.represented",
+                  displaySub.map(\.representedProvider) == ["deepseek", "opencode-go", "kimi"])
             let ocSelectedItems = StatusBarPresenter.renderMenu(.init(selectedProvider: .opencodeGo), now: now)
             let ocDisplaySub = ocSelectedItems.first { $0.title == "菜单栏显示" }?.submenu
-            check("Menu.menuBarSelection.checkMoves", ocDisplaySub?.map(\.title) == ["DeepSeek", "OpenCode Go ✓"])
+            check("Menu.menuBarSelection.checkMoves", ocDisplaySub?.map(\.title) == ["DeepSeek", "OpenCode Go ✓", "Kimi"])
+            let kimiSelectedItems = StatusBarPresenter.renderMenu(.init(selectedProvider: .kimi), now: now)
+            let kimiDisplaySub = kimiSelectedItems.first { $0.title == "菜单栏显示" }?.submenu
+            check("Menu.menuBarSelection.checkMovesToKimi", kimiDisplaySub?.map(\.title) == ["DeepSeek", "OpenCode Go", "Kimi ✓"])
 
             // Caffeinate 子菜单 + 倒计时行 + 取消守护。
             let caffSub = items.first { $0.title == "阻止系统休眠" }?.submenu
@@ -1924,6 +2282,8 @@ public enum SelfCheck {
                 (.deepseek, "Resources/provider_deepseek@3x.png"),
                 (.opencodeGo, "Resources/provider_opencode_go@2x.png"),
                 (.opencodeGo, "Resources/provider_opencode_go@3x.png"),
+                (.kimi, "Resources/provider_kimi@2x.png"),
+                (.kimi, "Resources/provider_kimi@3x.png"),
             ]
             let png: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
             for (pid, name) in needed {
@@ -1944,11 +2304,45 @@ public enum SelfCheck {
             // 未匹配 provider → nil（宁可只显示文字，也不借用别家 logo）。
             check("Logo.baseName.deepseek", LogoCatalog.assetBaseName(for: .deepseek) == "provider_deepseek")
             check("Logo.baseName.opencodeGo", LogoCatalog.assetBaseName(for: .opencodeGo) == "provider_opencode_go")
+            check("Logo.baseName.kimi", LogoCatalog.assetBaseName(for: .kimi) == "provider_kimi")
             check("Logo.baseName.unknownNil", LogoCatalog.assetBaseName(for: .unknown) == nil)
             check("Logo.image.unknownNil", LogoCatalog.image(for: .unknown) == nil)
+            // 每个受支持 provider 都必须有落地 logo（含 Kimi）—— 缺一个就会在菜单栏退化成纯文字。
+            check("Logo.baseName.allSupported",
+                  ProviderID.supported.allSatisfy { LogoCatalog.assetBaseName(for: $0) != nil })
             // 无 Resources 的裸二进制（swift run）下不应崩，且未知 provider 仍为 nil。
             let availability = LogoCatalog.debugAssertsAvailable(bundle: .main)
             check("Logo.debugAsserts.keys", Set(availability.keys) == Set(ProviderID.allCases.map { String(describing: $0) }))
+        }
+
+        // MARK: - App 图标（Resources/AppIcon.icns + Info.plist 的 CFBundleIconFile）
+
+        do {
+            let repoRoot = FileManager.default.currentDirectoryPath
+            let icnsPath = "\(repoRoot)/Resources/AppIcon.icns"
+            let data = try? Data(contentsOf: URL(fileURLWithPath: icnsPath))
+            check("AppIcon.present", (data?.count ?? 0) > 8)
+            check("AppIcon.signature", data.map { [UInt8]($0.prefix(4)) == Array("icns".utf8) } ?? false)
+
+            // Info.plist 声明的图标名必须与实际落地的 .icns 同名：Finder / NSAlert 只认这个键。
+            var declared: String?
+            if let plistData = try? Data(contentsOf: URL(fileURLWithPath: "\(repoRoot)/Resources/Info.plist")),
+               let plist = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil),
+               let dict = plist as? [String: Any] {
+                declared = dict["CFBundleIconFile"] as? String
+            }
+            check("AppIcon.declared", declared == "AppIcon")
+            check("AppIcon.declaredFilePresent",
+                  declared.map { FileManager.default.fileExists(atPath: "\(repoRoot)/Resources/\($0).icns") } ?? false)
+
+            // 尺寸必须成组齐全（16…1024），缺档会在 Finder / 弹窗里被放大糊掉。
+            let img = NSImage(contentsOfFile: icnsPath)
+            check("AppIcon.nsimage", img != nil)
+            let pixelSides = Set((img?.representations ?? []).compactMap { rep -> Int? in
+                let side = rep.pixelsWide
+                return side > 0 && side == rep.pixelsHigh ? side : nil
+            })
+            check("AppIcon.sizes", Set([16, 32, 64, 128, 256, 512, 1024]).isSubset(of: pixelSides))
         }
 
         return finish(&failures)

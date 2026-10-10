@@ -2,8 +2,8 @@ import Foundation
 
 /// 生产 `BalanceSource`：持有 config 读取 + HTTP 客户端。
 ///
-/// 内部对**每个 provider 独立跑一遍**：config 段查找 → 凭据检查 → fetch。
-/// 一个 provider 的失败绝不短路另一个，产出恒为「两个 provider 各有键」的完整事实。
+/// 内部对**每个 provider 独立跑一遍**：凭据来源判定 → 凭据检查 → fetch。
+/// 一个 provider 的失败绝不短路另一个，产出恒为「`ProviderID.supported` 每个都有键」的完整事实。
 public struct LiveBalanceSource: BalanceSource {
     public let config: KimiConfigSource
     public let http: HTTPClient
@@ -35,14 +35,28 @@ public struct LiveBalanceSource: BalanceSource {
     }
 
     private func captureOne(_ pid: ProviderID, cfg: KimiConfig, creds: any CredentialSource) async -> ProviderCapture {
-        guard let entry = cfg.provider(pid.configSectionName),
-              let provider = BalanceRegistry.provider(for: pid, config: cfg)
-        else {
+        guard let provider = BalanceRegistry.provider(for: pid, config: cfg) else {
             return ProviderCapture(failure: .providerMissing)
         }
-        // 段用 api_key_env 且没有内联 key → 凭据不可解析。刻意不调用 getenv（产品取舍）。
-        if entry.apiKey == nil, entry.usesAPIKeyEnv {
-            return ProviderCapture(failure: .credentialEnv)
+        // 凭据来源分两类（穷尽 switch：新增 provider 必须在这里做一次决定）：
+        // - `Kimi` 读 kimi-code 的内置工具服务段，没有 provider 段可查（ADR-0008）；
+        // - 其余读自己的 `[providers.<段名>]`。
+        switch pid {
+        case .kimi:
+            if let failure = KimiProvider.credentialPreflight(cfg) {
+                return ProviderCapture(failure: failure)
+            }
+        case .deepseek, .opencodeGo:
+            guard let entry = cfg.provider(pid.configSectionName) else {
+                return ProviderCapture(failure: .providerMissing)
+            }
+            // 段用 api_key_env 且没有内联 key → 凭据不可解析。刻意不调用 getenv（产品取舍）。
+            if entry.apiKey == nil, entry.usesAPIKeyEnv {
+                return ProviderCapture(failure: .credentialEnv)
+            }
+        case .unknown:
+            // `.unknown` 不在 `ProviderID.supported` 里，走不到；保留分支只为穷尽。
+            return ProviderCapture(failure: .providerMissing)
         }
         guard provider.hasCredential(creds: creds) else {
             return ProviderCapture(failure: .credentialEmpty)

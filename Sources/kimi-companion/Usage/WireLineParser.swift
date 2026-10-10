@@ -14,7 +14,7 @@ import Foundation
 ///    （同一 session 的 `output` 序列实测非单调：187 → 165 → 170 → 1654 → …）。
 ///    因此直接按其字段求和，**不做差分**。
 /// 3. 不读 `model`：用量已合并统计、不归属到 provider（ADR-0006），parser 不解析任何归属字段。
-///    （历史依据：`llm.request.provider` 的值是 wire 协议类型 `"openai"`，两个 provider 都是它，
+///    （历史依据：`llm.request.provider` 的值是 wire 协议类型 `"openai"`，所有 provider 都是它，
 ///    本来也不能用于归属。）
 public struct WireLineParser: Sendable {
     public init() {}

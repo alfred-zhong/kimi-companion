@@ -26,9 +26,10 @@ mkdir -p "${APP_DIR}/Contents/MacOS"
 mkdir -p "${APP_DIR}/Contents/Resources"
 cp "${BIN_PATH}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 cp Resources/Info.plist "${APP_DIR}/Contents/Info.plist"
-# Provider logo 由 LogoCatalog.image(for:) 在 bundle 里查表（@2x/@3x 两张）。
+# Provider logo 由 LogoCatalog.image(for:) 在 bundle 里查表（@2x/@3x 两张）；
+# AppIcon.icns 由 Info.plist 的 CFBundleIconFile 指向（Finder / NSAlert 用）。
 shopt -s nullglob
-for f in Resources/*.png; do
+for f in Resources/*.png Resources/*.icns; do
     cp "$f" "${APP_DIR}/Contents/Resources/"
 done
 shopt -u nullglob

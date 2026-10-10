@@ -7,9 +7,11 @@ Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock �
 - 菜单栏右上角展示**选中 Provider** 的余额 / 配额，左侧带该 Provider 的品牌 logo：
   - DeepSeek → `¥65.92`（CNY 账户余额）
   - OpenCode Go → `16%`（5h 滚动窗口已用百分比）
-- 弹出菜单（两个 Provider 的 section 永远都在，顺序固定）：
+  - Kimi → `¥49.59`（开放平台可用余额，CNY）
+- 弹出菜单（每个 Provider 的 section 永远都在，顺序固定 DeepSeek → OpenCode Go → Kimi）：
   - `DeepSeek`：余额行
   - `OpenCode Go`：5h / 7d / 月度三窗口进度条行（各自重置倒计时）
+  - `Kimi`：余额行
   - `今日 · ↑输入 · ↓输出 · ⚡缓存读取 · 🎯hit%` / `近 5h · …`：**全部会话合并**的一份用量，不按 Provider 或模型区分
   - `菜单栏显示 ▸`：切换菜单栏展示的 Provider
   - `阻止系统休眠 ▸`：30 / 60 / 120 分钟 + 倒计时行 + 取消守护
@@ -42,12 +44,15 @@ Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock �
 |---|---|---|
 | `DeepSeek` | 账户余额（CNY，形如 `¥65.92`） | `GET https://api.deepseek.com/user/balance` |
 | `OpenCode Go` | 5h / 7d / 月度窗口已用百分比 | `GET https://opencode.ai/zen/go/v1/usage` |
+| `Kimi` | 开放平台可用余额（CNY，形如 `¥49.59`） | `GET https://api.moonshot.cn/v1/users/me/balance` |
 
-两者都用 `Authorization: Bearer <api_key>`。`base_url` 若在 `config.toml` 里配了则以它为准（去掉尾部 `/` 后拼接路径）；非 HTTPS 或不带 host 的值会被忽略并回退到上表的官方默认地址。
+三个都用 `Authorization: Bearer <api_key>`，超时 10 秒。`DeepSeek` / `OpenCode Go` 的 `base_url` 若在 `config.toml` 里配了则以它为准（去掉尾部 `/` 后拼接路径）；非 HTTPS 或不带 host 的值会被忽略并回退到上表的官方默认地址。**`Kimi` 不适用这条**：地址写死国内站 `api.moonshot.cn`，`base_url` 一律不读——响应里没有 currency 字段，币种由站点隐含（`api.moonshot.cn` = CNY，`api.moonshot.ai` = USD），本 app 只服务国内站。
+
+`Kimi` 展示的 `data.available_balance` = 现金 + 代金券，就是「还能不能调用推理 API」的那个数：`≤ 0` 时该行会追加 ` ⚠`。`code != 0`、`status != true`、`data` 缺失或三个余额字段（`available_balance` / `voucher_balance` / `cash_balance`）任一不可解析都判为 `响应解析失败`，绝不展示凭空的 `¥0.00`。凭据来源见下「`Kimi` 的凭据例外」。
 
 ## 凭据
 
-凭据**只读** kimi-code 自己的 `~/.kimi-code/config.toml`，取 `[providers.<段名>]` 段里的内联 `api_key`；本 app 没有自己的凭据存储，不写回该文件、不读 Keychain、不解析 `api_key_env`。
+凭据**只读** kimi-code 自己的 `~/.kimi-code/config.toml`，取 `[providers.<段名>]` 段里的内联 `api_key`；本 app 没有自己的凭据存储，不写回该文件、不读 Keychain、不解析 `api_key_env`。唯一的例外是 `Kimi`（见下）。
 
 ```toml
 default_model = "OpenCode Go/deepseek-v4.1-flash"
@@ -64,6 +69,21 @@ api_key = "sk-..."
 - 段名逐字使用（`DeepSeek`、`OpenCode Go`），它同时是配置键与菜单 section 的标题。
 - `api_key` 为空 / 全空白视为没有凭据；段里只写了 `api_key_env` 时视为凭据不可解析（菜单里会说明原因）——Finder 启动的 GUI app 不继承用户 shell 环境，读环境变量不可靠。
 - 该文件不存在、无权限或 TOML 非法时，菜单栏降级为 `?kimi`。
+
+### `Kimi` 的凭据例外
+
+`Kimi` 是唯一**不读 `[providers.*]`** 的 Provider：它的凭据来自 kimi-code 内置工具服务段 `[services.moonshot_search]`，缺失时回退 `[services.moonshot_fetch]`——也就是 Kimi Code 里配 Moonshot 联网搜索 / 抓取工具用的那把开放平台 key（`sk-…`，与 Kimi Code 控制台的 `sk-kimi-…` 不是一套）。**不需要**为此新增 `[providers.Kimi]` 段：
+
+```toml
+[services.moonshot_search]    # kimi-code 内置工具服务段，本 app 只读它的内联 api_key
+base_url = "https://api.moonshot.cn/v1"
+api_key = "sk-..."
+```
+
+- 本 app 对 `config.toml` 始终只读、不写回：新增 Kimi 支持不需要改任何配置。
+- 这把 key 每次刷新（30 / 60 / 120s）随 `Authorization: Bearer` 发往 `https://api.moonshot.cn` 一次，仅此一个用途。
+- 代价是与内置搜索 / 抓取工具段耦合：改动或删除该 `api_key` 会让余额一并降级为 `⚠︎凭据`，菜单里给出具体原因（段不存在 / `api_key` 为空 / 只写了 `api_key_env`）。
+- 这一例外记录在 `docs/adr/0008-kimi-balance-scope-and-currency.md`。
 
 ## 用量数据来源
 
@@ -99,16 +119,19 @@ swift run kimi-companion --self-check
 
 ## 切换菜单栏展示的 Provider
 
-打开下拉菜单 →「菜单栏显示 ▸」→ 选中 `DeepSeek` 或 `OpenCode Go`（当前项带 ✓）。
+打开下拉菜单 →「菜单栏显示 ▸」→ 选中 `DeepSeek`、`OpenCode Go` 或 `Kimi`（当前项带 ✓）。
 
 - 选择会持久化到 UserDefaults，重启后保持。
 - **首次运行**时按 `config.toml` 的 `default_model` 前缀推导一次初值（推导不出则用 `DeepSeek`）；此后只有你的显式选择能改变它。
-- 某个 Provider 抓取失败**不会**把菜单栏自动切到另一个；菜单栏只会显示失败短标签，另一个 Provider 的 section 仍然正常显示自己的数据。
+- 某个 Provider 抓取失败**不会**把菜单栏自动切到其他 Provider；菜单栏只会显示失败短标签，其他 Provider 的 section 仍然正常显示自己的数据。
 
 ## 已知限制
 
-- **没有成本 / 消费数据**：本地只有 token 计数（输入、输出、缓存创建、缓存读取）与 DeepSeek 的账户余额，没有任何价格表或账单数据，因此菜单里不显示「花了多少钱」。
+- **没有成本 / 消费数据**：本地只有 token 计数（输入、输出、缓存创建、缓存读取）与 DeepSeek / Kimi 的账户余额，没有任何价格表或账单数据，因此菜单里不显示「花了多少钱」。
 - **first-party kimi-code 账号有意不支持**：`managed:kimi-code` 段的 `api_key` 恒为空、走 OAuth，且本地 `oauth/usage` 端点只覆盖该账号本身，产品上已排除。
+- **`Kimi` 只支持国内站**：端点写死 `api.moonshot.cn`（币种 CNY 由站点隐含，响应里没有 currency 字段）。拿国际站（`api.moonshot.ai`）的 key 来查会得到一次响亮的 `鉴权失败 (401)`，而不是静默的错值。
+- **不做 Kimi Code 订阅额度**：菜单里的 `Kimi` 余额是**开放平台账户**的可用余额（现金 + 代金券），与 Kimi Code 会员 / 订阅额度是两套账；订阅配额走未公开的 `/coding/v1/usages` 端点，不在支持范围。Kimi Code 控制台 key（`sk-kimi-…`）与开放平台 key（`sk-…`）不是一套，只有后者能查余额。
+- **`Kimi` 凭据耦合内置工具段**：复用 `[services.moonshot_search]` / `[services.moonshot_fetch]` 的 `api_key`（见上「`Kimi` 的凭据例外」），改动或删除那把 key 会让余额降级为 `⚠︎凭据`。
 - **runtime 覆盖不可见**：菜单栏展示的是用户显式选定的 Provider，不跟随会话内的临时模型切换。
 - **不做开机自启**：没有 LaunchAgent，也不写 `~/Library/LaunchAgents/*.plist`。
 - **仅本机 ad-hoc 签名**（`codesign --force --deep --sign -`），未做 Developer ID 公证，不适合分发。
@@ -127,3 +150,4 @@ swift run kimi-companion --self-check
 - `0005-menubar-provider-is-explicit.md` — 为什么菜单栏 Provider 是显式选择
 - `0006-combined-usage.md` — 为什么用量是合并的一份、不再按 Provider / model 区分
 - `0007-session-cleanup-in-app.md` — 为什么在 app 内直接删文件系统做清理，以及保留策略为何是合取
+- `0008-kimi-balance-scope-and-currency.md` — `Kimi` 余额的范围与币种：为什么端点写死国内站、币种恒为 CNY，以及为什么凭据取自内置工具服务段而非 `[providers.*]`

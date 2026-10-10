@@ -13,16 +13,20 @@ _Avoid_: 状态栏 app、系统托盘 app、后台服务
 _Avoid_: 状态栏图标、托盘图标
 
 **Provider**:
-kimi-code 经 `config.toml` 的 `[providers.*]` 段配置的第三方模型服务商或订阅网关；每个 Provider 暴露一个查询余额 / 配额的 HTTPS 端点与一份内联凭据。本 app 只支持两个：DeepSeek（账户余额）与 OpenCode Go（订阅配额）。
+kimi-code 经 `config.toml` 的 `[providers.*]` 段配置的第三方模型服务商或订阅网关；每个 Provider 暴露一个查询余额 / 配额的 HTTPS 端点与一份凭据。本 app 支持三个：DeepSeek（账户余额）、OpenCode Go（订阅配额）与 Kimi（开放平台可用余额）。
 _Avoid_: 服务商、模型提供方、平台
 
 **Provider Name**:
-`[providers.<name>]` 的段名，逐字使用（`DeepSeek`、`OpenCode Go`，后者含空格）；它同时是配置键与菜单 section 的标题。
+`[providers.<name>]` 的段名，逐字使用（`DeepSeek`、`OpenCode Go`，后者含空格）；它同时是配置键与菜单 section 的标题。`Kimi` 没有对应的 provider 段，这个名字只承担菜单标题与 `default_model` 前缀匹配。
 _Avoid_: provider id、provider key、显示名
 
 **Balance**:
 DeepSeek 账户的可用金额（CNY），取自余额端点的总额字段；不等同于 token 用量、订阅额度或充值记录。
 _Avoid_: 额度、积分、充值余额
+
+**Available Balance**:
+Kimi 开放平台账户的可用金额（CNY），等于现金余额加代金券余额；`≤ 0` 表示该账户已无法调用推理 API。与 Balance 是两套账：一个来自 DeepSeek 的账户总额字段，一个来自 Moonshot 的可用余额字段。
+_Avoid_: 余额、账户余额、订阅额度
 
 **Quota Window**:
 OpenCode Go 订阅的一个额度窗口；每窗口由已用百分比、服务端状态串与重置时刻组成。

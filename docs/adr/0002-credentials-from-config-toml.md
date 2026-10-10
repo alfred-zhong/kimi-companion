@@ -4,7 +4,7 @@ provider 凭据**只读** `~/.kimi-code/config.toml` 里 `[providers.<段名>].a
 
 ## Status
 
-已采纳（Accepted）。
+已采纳（Accepted）。凭据来源范围被 [0008](0008-kimi-balance-scope-and-currency.md) 部分修订：`Kimi` 的凭据来自 `[services.moonshot_search]` / `[services.moonshot_fetch]`，其余 provider 仍只读 `[providers.<段名>]`。
 
 ## Context
 

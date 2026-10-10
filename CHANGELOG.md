@@ -5,17 +5,19 @@
 ### 新增特性
 
 - macOS 菜单栏常驻 app，`LSUIElement`，无 Dock 图标；菜单栏展示选中 Provider 的余额 / 配额，左侧渲染该 Provider 的品牌 logo（template 图，跟随菜单栏明暗自动着色；未知 Provider 不借用别家 logo，只显示文字）。
-- 支持两个 Provider：`DeepSeek`（`GET <base_url>/user/balance`，账户 CNY 余额，状态栏形如 `¥65.92`）与 `OpenCode Go`（`GET <base_url>/usage`，5h 滚动 / 7d / 月度三窗口已用百分比，状态栏形如 `16%`）。
-- 凭据只读 `~/.kimi-code/config.toml` 的 `[providers.<段名>].api_key`，本 app 不新增凭据存储、不读 Keychain、不解析 `api_key_env`（决策见 `docs/adr/0002-credentials-from-config-toml.md`）。
-- 下拉菜单按 Provider 分区（固定顺序 DeepSeek → OpenCode Go，两个 section 永远都在）：DeepSeek 段为余额行；OpenCode Go 段为三窗口进度条行（各自重置倒计时）。两个 section 里都**不再**带该 Provider 的用量行。
-- 用量只有**一份合并**的，位于两个 Provider section 之后、「菜单栏显示」之前：`今日 · ↑输入 · ↓输出 · ⚡缓存读取 · 🎯hit%` 与 `近 5h · …`；不按 Provider / model 区分，任何 `model` 前缀的记录（含不匹配任何 Provider 的）都计入同一份合计（决策见 `docs/adr/0006-combined-usage.md`）。
+- 支持三个 Provider：`DeepSeek`（`GET <base_url>/user/balance`，账户 CNY 余额，状态栏形如 `¥65.92`）、`OpenCode Go`（`GET <base_url>/usage`，5h 滚动 / 7d / 月度三窗口已用百分比，状态栏形如 `16%`）与 `Kimi`（`GET https://api.moonshot.cn/v1/users/me/balance`，开放平台可用余额 CNY，状态栏形如 `¥49.59`）。
+- 新增第三个 Provider `Kimi`（Moonshot 开放平台余额）：`Authorization: Bearer <api_key>`，10s 超时；展示 `data.available_balance`（= 现金 + 代金券）的单行 `余额 ¥49.59`，`available_balance ≤ 0` 时该行追加 ` ⚠`。有两处刻意的例外（决策见 `docs/adr/0008-kimi-balance-scope-and-currency.md`）：**地址与币种写死国内站**（`base_url` 一律不读；响应里没有 currency 字段，币种恒为 CNY，用国际站 key 会得到 `鉴权失败 (401)` 而不是静默的错值），**凭据取自 kimi-code 内置工具服务段** `[services.moonshot_search]`（缺失时回退 `[services.moonshot_fetch]`）的内联 `api_key`，不需要也不读 `[providers.Kimi]` 段。`code != 0` / `status != true` / `data` 缺失 / `available_balance`、`voucher_balance`、`cash_balance` 任一不可解析一律判 `响应解析失败`，不展示凭空的 `¥0.00`；凭据段缺失 / `api_key` 为空 / 只用 `api_key_env` 各给一条中文说明，状态栏短标签统一 `⚠︎凭据`。
+- 凭据只读 `~/.kimi-code/config.toml` 的 `[providers.<段名>].api_key`，本 app 不新增凭据存储、不读 Keychain、不解析 `api_key_env`（决策见 `docs/adr/0002-credentials-from-config-toml.md`）。唯一例外是 `Kimi`（见上条），它读 `[services.moonshot_search]` / `[services.moonshot_fetch]` 的内联 `api_key`。
+- 下拉菜单按 Provider 分区（固定顺序 DeepSeek → OpenCode Go → Kimi，每个 section 永远都在）：DeepSeek / Kimi 段为余额行；OpenCode Go 段为三窗口进度条行（各自重置倒计时）。每个 section 里都**不再**带该 Provider 的用量行。
+- 用量只有**一份合并**的，位于全部 Provider section 之后、「菜单栏显示」之前：`今日 · ↑输入 · ↓输出 · ⚡缓存读取 · 🎯hit%` 与 `近 5h · …`；不按 Provider / model 区分，任何 `model` 前缀的记录（含不匹配任何 Provider 的）都计入同一份合计（决策见 `docs/adr/0006-combined-usage.md`）。
 - 「菜单栏显示 ▸」子菜单切换菜单栏展示的 Provider，选择持久化到 UserDefaults；首次运行由 `default_model` 前缀推导一次初值，此后用户选择优先，采集失败不自动切换（决策见 `docs/adr/0005-menubar-provider-is-explicit.md`）。
 - 用量来源：`~/.kimi-code/sessions/<workspace>/<session>/agents/<agent>/wire.jsonl` 的 `usage.record` 行；只读 `time` 与 `usage` 四个计数，**不读 `model`**（全部记录合并统计）；12 个滑动小时桶 + 今日合并聚合，去重键为 `(相对路径, 行偏移)`。
 - wire 日志增量读取：进程内 Read Cursor（偏移 / 大小 / mtime / 文件身份 / 未成行尾部字节）+ mtime 预筛，每次只读追加字节，不落盘；保留窗口为 `min(当日零点, now − 12h)`（决策见 `docs/adr/0004-wire-log-read-cursor.md`）。
 - 移植「阻止系统休眠」守护：基于 IOPMAssertion 同时阻止系统与显示器空闲睡眠，30 / 60 / 120 分钟三档可重复覆盖启动，到期或取消自动释放，进程退出静默释放；守护期间菜单栏变咖啡色胶囊并在余额右侧追加 ` ☕`，倒计时只在菜单打开期间按秒走动，到期释放由一次性定时器触发而非轮询。
 - 错误降级永不空白：`config.toml` 不可读 / 非法时菜单栏显示 `?kimi`；单个 Provider 的段缺失、`api_key` 为空、使用 `api_key_env` 或远端失败时显示 `⚠︎配置` / `⚠︎凭据`，下拉菜单给出可照抄去改配置的中文说明；抓取失败但存在旧值时保留旧值并标注「旧值」。
 - SwiftUI 偏好面板：刷新间隔三档（30 / 60 / 120 秒，默认 60 秒），存量非法值自动回退默认档并写回自愈。
-- 一键构建：`./build.sh`（编译 + 复制 `Resources/*.png` + 拼 `.app` bundle + ad-hoc 签名）。
+- app 图标：新增 `Resources/AppIcon.icns`（16…1024 全档位）与生成脚本 `Tools/make-appicon.swift`（`swift Tools/make-appicon.swift` 可重新生成），`Info.plist` 声明 `CFBundleIconFile=AppIcon`，`build.sh` 一并复制进 bundle —— Finder 与清理预览 / 结果弹窗（`NSAlert` 默认取 app 图标）不再显示通用图标。图形是原创的（不借用任何 Provider 的品牌 mark，同 `LogoCatalog` 的原则）：macOS 标准 824 网格的圆角方形 + 三条白色配额条（对应菜单里每个 Provider 的余额 / 配额行），带 16 / 32 两个小尺寸的简化档（去掉轨道，只留实心条）。`SelfCheck` 断言 icns 存在、`icns` magic、`Info.plist` 声明与实际文件同名、尺寸档位齐全。
+- 一键构建：`./build.sh`（编译 + 复制 `Resources/*.png` / `*.icns` + 拼 `.app` bundle + ad-hoc 签名）。
 - 自检入口：`swift run kimi-companion --self-check`，覆盖格式化 / 响应解码 / 用量合并口径 / 增量读取契约 / tick 状态机 / 菜单与状态栏渲染 / 守护路径 / 清理策略与产物修剪。
 - 菜单新增 `清理 session 文件…`（`立即刷新` 之后、独立成组、无快捷键）：点击后先在后台扫描 `~/.kimi-code`，弹出预览（相当于脚本的 `--dry-run`，只列将被删除的 session，按工作区分组并给出可回收体积），用户点「确定」才真删，点「取消」什么都不做；删完再弹结果，并触发一次完整刷新。这是 app 唯一的破坏性能力（决策见 `docs/adr/0007-session-cleanup-in-app.md`）。
 - 清理策略两道参数 + 一道常量：**工作区保留数**（默认 3，范围 1…20）与**保留天数**（默认 7，范围 0…365，`0` 表示不限），另加写死的 30 分钟活跃保护。判定是合取——只有「不在保留名额内」「距最后更新 ≥ 30 分钟」「已满保留天数」三条同时成立才删，每个工作区永远保留最新 1 个。
@@ -25,7 +27,7 @@
 
 ### 变更
 
-- 用量统计不再按 Provider 或 model 区分：下拉菜单里只剩**一份**合并的 `今日` / `近 5h`，位于两个 Provider section 之后、「菜单栏显示」之前。
+- 用量统计不再按 Provider 或 model 区分：下拉菜单里只剩**一份**合并的 `今日` / `近 5h`，位于全部 Provider section 之后、「菜单栏显示」之前。
 - 移除按 `usage.record.model` 的 `<Provider>/` 前缀归属用量的逻辑：`model` 字段不再被读取，`UsageGroup` / 「其他」尾行一并删除；任何 `model` 前缀的记录都计入同一份合计（决策见 `docs/adr/0006-combined-usage.md`，原 `docs/adr/0003-usage-attribution-by-model-prefix.md` 已被取代）。
 - `session_index.jsonl` 修剪改为**只摘掉**「有 `sessionDir` 字段且该目录已不存在」的行：kimi-code 自己写的墓碑行（`{"sessionId":…,"deleted":true}`）、不可解析的行、以及 `sessionDir` 不是非空绝对路径的行一律原样保留（路径形态不对时无法判定目录是否存在，保留一行只是留个残条，删掉一行却可能丢掉活着的 session），不再像脚本那样按 `sessionId` 是否存活整行删除。写前备份为 `session_index.jsonl.bak-<yyyyMMddHHmmss>`（本地时区）而不是会被每次运行覆盖的固定 `.bak` 名，且只有真的有改动时才写文件、才留备份。
 - 偏好窗口从 360×96 放大到 420×170，容纳清理策略两项参数。

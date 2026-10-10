@@ -7,7 +7,7 @@ import Foundation
 /// `SelfCheck` 因此可以完全不碰真实 UI 地断言全部渲染逻辑。
 /// - `renderTitle` 处理菜单栏标题优先级链
 /// - `renderChrome` 输出胶囊外观参数
-/// - `renderMenu` 重建弹出菜单（两个 provider section + 合并用量块 + 菜单栏选择 + caffeinate）
+/// - `renderMenu` 重建弹出菜单（每个受支持 provider 一个 section + 合并用量块 + 菜单栏选择 + caffeinate）
 public enum StatusBarPresenter {
 
     // MARK: - Inputs
@@ -229,7 +229,7 @@ public enum StatusBarPresenter {
 
     /// 弹出菜单。
     ///
-    /// 结构（固定顺序，两个 provider 永远都在；用量只有**一份合并**的，不按 provider 分）：
+    /// 结构（固定顺序，`ProviderID.supported` 每个 provider 的 section 永远都在；用量只有**一份合并**的，不按 provider 分）：
     /// ```
     /// DeepSeek
     ///   余额 ¥65.92 [⚠]
@@ -239,10 +239,13 @@ public enum StatusBarPresenter {
     ///   [7d ███ 22% 5d3h 后重置]
     ///   [月度 ██ 13% 26d 后重置]
     /// ──────
+    /// Kimi
+    ///   余额 ¥49.59 [⚠]
+    /// ──────
     /// 今日 · ↑… · ↓… · ⚡… · 🎯…%
     /// 近 5h · …
     /// ──────
-    /// 菜单栏显示 ▸ (DeepSeek / OpenCode Go，选中打 ✓)
+    /// 菜单栏显示 ▸ (DeepSeek / OpenCode Go / Kimi，选中打 ✓)
     /// ──────
     /// 阻止系统休眠 ▸ (30 / 60 / 120 分钟) + 倒计时行 + 取消守护
     /// ──────
@@ -260,7 +263,7 @@ public enum StatusBarPresenter {
             items.append(contentsOf: providerSection(pid, inputs, now: now))
         }
 
-        // 两个 provider section 之后、菜单栏选择之前：一份合并的用量块。
+        // 全部 provider section 之后、菜单栏选择之前：一份合并的用量块。
         let usage = usageItems(inputs)
         if !usage.isEmpty {
             items.append(.separator)

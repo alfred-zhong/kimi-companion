@@ -4,20 +4,28 @@ import Foundation
 
 /// kimi-code 经 `~/.kimi-code/config.toml` 的 `[providers.*]` 配置的第三方模型服务商。
 ///
-/// 只支持两个：`DeepSeek`（账户余额，CNY）与 `OpenCode Go`（三窗口配额，百分比）。
+/// 支持三个：`DeepSeek`（账户余额，CNY）、`OpenCode Go`（三窗口配额，百分比）与
+/// `Kimi`（Moonshot 开放平台可用余额，CNY）。
+/// `Kimi` 与另两个有两处不同（决策见 `docs/adr/0008-kimi-balance-scope-and-currency.md`）：
+/// 端点写死国内站 `api.moonshot.cn`，且凭据来自 `[services.moonshot_*]` 而非 provider 段。
 /// first-party `managed:kimi-code` 有意不支持：它的 `api_key` 恒为空、走 OAuth，
 /// 且本地 `oauth/usage` 端点只覆盖该账号（产品上已排除）。
 public enum ProviderID: String, CaseIterable, Sendable {
     case deepseek
     case opencodeGo = "opencode-go"
+    case kimi
     /// 未匹配任何受支持 provider；只用作 `default_model` 前缀推导的失败哨兵与 logo 缺省分支。
     case unknown
 
     /// config.toml 里的段名，**逐字**使用（`"OpenCode Go"` 含空格）。
+    ///
+    /// `Kimi` 是例外：它没有 `[providers.Kimi]` 段，这里只承担展示名与 `default_model`
+    /// 前缀匹配，凭据来自 `[services.moonshot_*]`（ADR-0008）。
     public var configSectionName: String {
         switch self {
         case .deepseek: return "DeepSeek"
         case .opencodeGo: return "OpenCode Go"
+        case .kimi: return "Kimi"
         // `.unknown` 不是配置段：查表路径一律遍历 `ProviderID.supported`，走不到这里。
         case .unknown: return rawValue
         }
@@ -26,8 +34,8 @@ public enum ProviderID: String, CaseIterable, Sendable {
     /// 面向用户的展示名（菜单 section header）。与段名同值。
     public var displayName: String { configSectionName }
 
-    /// 下拉菜单里始终展示的 provider，顺序固定：DeepSeek → OpenCode Go。
-    public static let supported: [ProviderID] = [.deepseek, .opencodeGo]
+    /// 下拉菜单里始终展示的 provider，顺序固定：DeepSeek → OpenCode Go → Kimi。
+    public static let supported: [ProviderID] = [.deepseek, .opencodeGo, .kimi]
 
     /// 由 `usage.record.model` 的 `<Provider>/<model>` 前缀解析 provider。
     /// 段名逐字匹配（含空格），另接受 rawValue 小写形式；其余一律 `.unknown`。
@@ -75,9 +83,10 @@ public struct BalanceResult: Equatable, Sendable {
     /// 已用百分比（0-100，服务端原样，展示层不换算）。
     public let usedPercent: Double?
     public let resetRemaining: TimeInterval?
-    /// 额度窗口：OpenCode Go 三窗口（5h / 7d / 月度）；DeepSeek 为 nil。
+    /// 额度窗口：OpenCode Go 三窗口（5h / 7d / 月度）；金额型 provider（DeepSeek / Kimi）为 nil。
     public let quotaWindows: [QuotaWindow]?
-    /// DeepSeek `is_available`；nil = 该 provider 不返回此字段。
+    /// 「当前是否可用」：DeepSeek 取响应里的 `is_available`；Kimi 取 `available_balance > 0`
+    /// （≤ 0 时推理调用会报 `exceeded_current_quota_error`）。nil = 该 provider 不返回此信号。
     public let isAvailable: Bool?
 
     public init(
@@ -131,7 +140,7 @@ public struct QuotaWindow: Equatable, Sendable {
 /// 类型化而非裸字符串：菜单栏短标签（`⚠︎配置` / `⚠︎凭据`）与菜单长文案都由它纯函数派生，
 /// 因此 `StatusBarPresenter` 不需要嗅探文案内容。
 public enum ProviderFailure: Equatable, Sendable {
-    /// config.toml 不可读 / 非法（全局失败，两个 provider 各带一份）。
+    /// config.toml 不可读 / 非法（全局失败，每个 provider 各带一份）。
     case configUnreadable(String)
     /// config.toml 可读但不存在该 `[providers.<name>]` 段。
     case providerMissing
@@ -139,6 +148,10 @@ public enum ProviderFailure: Equatable, Sendable {
     case credentialEmpty
     /// 段用 `api_key_env` 指定凭据；本 app 只读内联 key，不解析环境变量。
     case credentialEnv
+    /// 凭据段本身不可用：`[services.<段名>]` 不存在 / 其 `api_key` 为空 / 只写了 `api_key_env`。
+    /// 目前只有 `Kimi` 会走到这里（凭据来自 kimi-code 内置工具服务段，ADR-0008）；
+    /// reason 已是中文，由知道候选段名的一方（`KimiProvider.credentialPreflight`）拼好。
+    case credentialSection(String)
     /// 远端 / 网络 / 解析失败；reason 已是中文。
     case fetch(String)
 
@@ -146,7 +159,7 @@ public enum ProviderFailure: Equatable, Sendable {
     public var statusBarTag: String {
         switch self {
         case .configUnreadable, .providerMissing: return "配置"
-        case .credentialEmpty, .credentialEnv: return "凭据"
+        case .credentialEmpty, .credentialEnv, .credentialSection: return "凭据"
         case .fetch: return ""
         }
     }
@@ -162,6 +175,8 @@ public enum ProviderFailure: Equatable, Sendable {
             return "provider \"\(provider.configSectionName)\" 的 api_key 为空"
         case .credentialEnv:
             return "provider \"\(provider.configSectionName)\" 使用 api_key_env，本 app 只读内联 api_key"
+        case .credentialSection(let reason):
+            return reason
         case .fetch(let reason):
             return reason
         }
@@ -179,7 +194,7 @@ public struct ProviderCapture: Sendable, Equatable {
     }
 }
 
-/// 单个 provider 的展示状态。两个 provider 各自独立演化 —— 一个失败绝不触碰另一个，
+/// 单个 provider 的展示状态。每个 provider 各自独立演化 —— 一个失败绝不触碰另一个，
 /// 菜单栏也绝不因此自动切到另一个（用户的显式选择高于网络抖动）。
 public struct ProviderBalanceState: Equatable, Sendable {
     public let provider: ProviderID

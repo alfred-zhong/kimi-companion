@@ -73,7 +73,7 @@ public struct DeepSeekProvider: BalanceProvider {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let infos = json["balance_infos"] as? [[String: Any]],
               let first = infos.first,
-              let total = doubleValue(first["total_balance"]),
+              let total = jsonDouble(first["total_balance"]),
               total.isFinite
         else {
             throw HTTPError.invalidResponse
@@ -86,13 +86,14 @@ public struct DeepSeekProvider: BalanceProvider {
             isAvailable: json["is_available"] as? Bool
         )
     }
+}
 
-    /// `total_balance` 可能是字符串（线上形状）也可能是数字（防御性兼容）。
-    private static func doubleValue(_ v: Any?) -> Double? {
-        if let s = v as? String { return Double(s) }
-        if let n = v as? NSNumber { return n.doubleValue }
-        return nil
-    }
+/// JSON 数值兼容取法：线上既可能是字符串（DeepSeek 的 `total_balance` 就是 `"65.92"`）
+/// 也可能是数字（Moonshot 的 `available_balance`）。两者都接受，其余返回 nil。
+func jsonDouble(_ v: Any?) -> Double? {
+    if let s = v as? String { return Double(s) }
+    if let n = v as? NSNumber { return n.doubleValue }
+    return nil
 }
 
 // MARK: - OpenCode Go
@@ -211,19 +212,135 @@ public struct OpenCodeGoProvider: BalanceProvider {
     }
 }
 
+// MARK: - Kimi（Moonshot 开放平台）
+
+/// Kimi / Moonshot 开放平台余额 provider：
+/// `GET https://api.moonshot.cn/v1/users/me/balance`，`Authorization: Bearer <api_key>`。
+///
+/// 响应形状（国内站 / 国际站同构，单位由站点隐含）：
+/// ```json
+/// {"code":0,"data":{"available_balance":49.58894,"voucher_balance":46.58893,
+///   "cash_balance":3.00001},"scode":"0x0","status":true}
+/// ```
+/// 与另两个 provider 的两处不同（决策见 `docs/adr/0008-kimi-balance-scope-and-currency.md`）：
+/// 1. **地址与币种写死国内站**，不读 `base_url`：响应里**没有** currency 字段，单位只由站点
+///    隐含（`api.moonshot.cn` = 人民币，`api.moonshot.ai` = 美元），本 app 只服务国内站；
+///    拿国际站 key 来查的后果是一次响亮的 `鉴权失败 (401)`，不是静默错值。
+/// 2. **凭据来自 kimi-code 的内置工具服务段**（`[services.moonshot_search]` /
+///    `[services.moonshot_fetch]`），而不是 `[providers.*]` 段。
+///
+/// `available_balance` = 现金 + 代金券，就是「还能不能调用推理 API」的那个数：`≤ 0` 时推理调用
+/// 返回 `exceeded_current_quota_error`，故 `isAvailable = balance > 0`（菜单里会追加 ` ⚠`）。
+/// 三个余额字段 all-or-nothing：任一缺失 / 不可解析 → `invalidResponse`，
+/// 宁可报错也不展示一个凭空的 `¥0.00`。
+public struct KimiProvider: BalanceProvider {
+    public let id: ProviderID = .kimi
+
+    /// 余额端点：写死国内站，`base_url` 不参与（ADR-0008）。
+    public static let balanceURL = URL(string: "https://api.moonshot.cn/v1/users/me/balance")!
+
+    /// 凭据段候选，按顺序取第一个存在的；两段通常指向同一把平台 key。
+    /// 用「凭据路径」写法（`services.<段名>`），与 `KimiConfig.credentialSection(_:)` 对齐。
+    public static let credentialSectionNames = [
+        "services.moonshot_search",
+        "services.moonshot_fetch",
+    ]
+
+    public init() {}
+
+    /// 凭据预检：段缺失 / `api_key` 为空 / 只写了 `api_key_env` 各给一条可照抄的中文说明，
+    /// 可用时返回 nil。文案在这里拼 —— 只有它知道候选段名，`ProviderFailure` 不需要知道。
+    public static func credentialPreflight(_ cfg: KimiConfig) -> ProviderFailure? {
+        let present = presentCredentialSections(cfg)
+        guard let first = present.first else {
+            let names = credentialSectionNames.joined(separator: " 或 ")
+            return .credentialSection("config 中未找到 \(names) 的 api_key")
+        }
+        // 与 `resolveKey` 对齐：任一候选段带内联 key 就算可用。否则会出现自相矛盾的情形 ——
+        // 第一段空着（或只写 `api_key_env`）、第二段有 key 时，预检报凭据失败却明明查得到凭据。
+        if present.contains(where: { $0.entry.apiKey != nil }) { return nil }
+        if first.entry.usesAPIKeyEnv {
+            return .credentialSection("\(first.path) 使用 api_key_env，本 app 只读内联 api_key")
+        }
+        return .credentialSection("\(first.path) 的 api_key 为空")
+    }
+
+    /// 按候选顺序列出**存在**的凭据段（存在性判断，不看是否有 key）。
+    static func presentCredentialSections(_ cfg: KimiConfig) -> [(path: String, entry: KimiProviderEntry)] {
+        var out: [(path: String, entry: KimiProviderEntry)] = []
+        for path in credentialSectionNames {
+            if let entry = cfg.credentialSection(path) { out.append((path: path, entry: entry)) }
+        }
+        return out
+    }
+
+    /// 第一个存在的凭据段。
+    static func firstCredentialSection(_ cfg: KimiConfig) -> (path: String, entry: KimiProviderEntry)? {
+        presentCredentialSections(cfg).first
+    }
+
+    /// 第一把可用凭据；候选段都没有内联 key 时 nil。
+    static func resolveKey(creds: any CredentialSource) -> String? {
+        for path in credentialSectionNames {
+            if let key = creds.resolve(path) { return key }
+        }
+        return nil
+    }
+
+    public func hasCredential(creds: any CredentialSource) -> Bool {
+        Self.resolveKey(creds: creds) != nil
+    }
+
+    public func fetch(creds: any CredentialSource, http: HTTPClient) async throws -> BalanceResult {
+        guard let key = Self.resolveKey(creds: creds) else {
+            throw HTTPError.missingCredential
+        }
+        let (data, _) = try await http.get(
+            url: Self.balanceURL,
+            headers: ["Authorization": "Bearer \(key)"],
+            timeoutSeconds: 10
+        )
+        return try Self.decode(data)
+    }
+
+    /// 解码响应：`code` 必须为 0、`status` 必须为 true、三个余额字段必须都可解析。
+    public static func decode(_ data: Data) throws -> BalanceResult {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              jsonDouble(json["code"]) == 0,
+              json["status"] as? Bool == true,
+              let payload = json["data"] as? [String: Any],
+              let available = jsonDouble(payload["available_balance"]),
+              jsonDouble(payload["voucher_balance"])?.isFinite == true,
+              jsonDouble(payload["cash_balance"])?.isFinite == true,
+              available.isFinite
+        else {
+            throw HTTPError.invalidResponse
+        }
+        return BalanceResult(
+            provider: .kimi,
+            balance: available,
+            currency: .cny,
+            isAvailable: available > 0
+        )
+    }
+}
+
 // MARK: - Registry
 
 public enum BalanceRegistry {
-    /// 生产 provider 列表：顺序与 `ProviderID.supported` 一致，`base_url` 来自 config。
+    /// 生产 provider 列表：顺序与 `ProviderID.supported` 一致；`base_url` 来自 config（`Kimi` 除外）。
     public static func all(config: KimiConfig?) -> [BalanceProvider] {
         ProviderID.supported.compactMap { provider(for: $0, config: config) }
     }
 
     public static func provider(for id: ProviderID, config: KimiConfig?) -> BalanceProvider? {
-        let baseURL = config?.provider(id.configSectionName)?.baseURL
         switch id {
-        case .deepseek: return DeepSeekProvider(baseURL: baseURL)
-        case .opencodeGo: return OpenCodeGoProvider(baseURL: baseURL)
+        case .deepseek:
+            return DeepSeekProvider(baseURL: config?.provider(id.configSectionName)?.baseURL)
+        case .opencodeGo:
+            return OpenCodeGoProvider(baseURL: config?.provider(id.configSectionName)?.baseURL)
+        // `Kimi` 的地址与币种写死国内站，刻意不读 `base_url`（ADR-0008）。
+        case .kimi: return KimiProvider()
         case .unknown: return nil
         }
     }

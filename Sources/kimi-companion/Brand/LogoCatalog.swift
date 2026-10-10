@@ -20,6 +20,7 @@ public enum LogoCatalog {
         switch id {
         case .deepseek: return "provider_deepseek"
         case .opencodeGo: return "provider_opencode_go"
+        case .kimi: return "provider_kimi"
         case .unknown: return nil
         }
     }
