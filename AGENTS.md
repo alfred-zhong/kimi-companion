@@ -2,7 +2,7 @@
 
 > 面向 AI 助手的仓库协作手册。补充人类规范；不重复常识。决策缘由见 `docs/adr/0001-0008`（0003 已被 0006 取代）。
 
-macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 kimi-code desktop 所用第三方 provider 的余额 / 配额，加一份**合并的** token 用量（不区分 provider / model）。每 30 / 60 / 120s 刷新（默认 60s）。抓取失败永不空白：菜单栏显示 `?kimi` / `⚠︎<短标签>`，菜单给出可照抄去改配置的中文说明。
+macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 kimi-code desktop 所用第三方 provider 的余额 / 配额，加一份**合并的** token 用量与模型请求次数（不区分 provider / model）。每 30 / 60 / 120s 刷新（默认 60s）。抓取失败永不空白：菜单栏显示 `?kimi` / `⚠︎<短标签>`，菜单给出可照抄去改配置的中文说明。
 
 - **Provider**：`DeepSeek`（账户余额 CNY）、`OpenCode Go`（5h / 7d / 月度三窗口配额，已用百分比）、`Kimi`（Moonshot 开放平台可用余额 CNY，单行 `余额 ¥49.59`，`available_balance ≤ 0` 时该行追加 ` ⚠`）。
 - 有意不支持 first-party `managed:kimi-code` 账号（`api_key` 恒空、走 OAuth，本地 `oauth/usage` 端点只覆盖该账号）。
@@ -10,7 +10,7 @@ macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 kimi-code 
 ## 硬性不变量
 
 - **凭据**：只读 `~/.kimi-code/config.toml` 的内联 `api_key`（ADR-0002）。通用来源 `[providers.<段名>]`；`[services.moonshot_search]` / `[services.moonshot_fetch]` 是**只服务 `Kimi` 的例外**（ADR-0008），不得扩展成通用凭据通道。不写回该文件、不读 Keychain、不读 `api_key_env`（不 `getenv`）、不碰 kimi-code 本地 HTTP server（`server/instances/*.json`、`server.token`、`mcp.json`）。
-- **用量是合并的一份**（ADR-0006）：所有 `usage.record` 无条件求和，不按 provider / model 分组，`model` 字段完全不读。菜单里 provider section 只放余额 / 配额；用量块（`今日` / `近 5h`）独立成段，放在所有 section 之后。
+- **用量是合并的一份**（ADR-0006）：`usage.record`（token）与 `llm.request`（请求次数）无条件求和，不按 provider / model 分组，`model` / `modelAlias` / `provider` 字段完全不读。菜单里 provider section 只放余额 / 配额；用量块（`今日` / `近 5h`）独立成段，放在所有 section 之后。请求次数是**尝试**口径（含重试与被中断的尝试），因此大于「拿到 usage 的调用数」。
 - **无磁盘缓存**：每 tick 实时查 provider + 增量读会话日志，Read Cursor 只在进程内（ADR-0004）。不写 `~/Library/Caches/<bundle-id>/`。唯一持久化是 UserDefaults（刷新间隔 / 选中 provider / 清理策略）。
 - **菜单栏 provider 是显式选择**（ADR-0005）：`default_model` 推导只在首启用一次，此后用户选择优先，provider 失败绝不自动切换 `selectedProvider`。
 - **不 shell-out 任何上游 CLI**。新增 provider 只需枚举 case + `BalanceProvider.fetch`，外加在 `LiveBalanceSource.captureOne` 的穷尽 `switch` 里声明凭据来源（漏了会编译失败）。
@@ -79,12 +79,14 @@ make clean   # rm -rf build .build
 - 错误文案集中在 `ProviderFailure.menuText(provider:)` + `LiveBalanceSource.humanReadable(_:)`，新增错误显示分支优先复用。
 - `renderTitle` 优先级：`configMissing("?kimi") > 选中 provider 的 result > 其 failure(⚠︎<短标签>) > "···"`，**只看选中 provider**。所有分支头部补两个 Thin Space（`\u{2009}\u{2009}`）拉开 logo 与文字间距；caffeinate 激活时余额右侧追加 ` ☕`（`\u{2615}`，咖啡色 `#8B5A2B`）。
 - 时间：`formatHMS(_:)` → `HhMm`；`formatDuration(_:)` → `≥24h` 用 `XdYh`、否则 `HhMm`，全程无空格。
-- 用量行（`StatusBarPresenter.dailyLine`）：`今日 · ↑in · ↓out · ⚡cacheRead · 🎯hit%` 与 `近 5h · …`，两份都是**合并口径**；菜单里只有这两行，没有 per-provider 用量行，也没有「其他」行。
+- 用量行（`StatusBarPresenter.dailyLine`）：`今日 · 请求 N · ↑in · ↓out · ⚡cacheRead · 🎯hit%` 与 `近 5h · …`，两份都是**合并口径**；菜单里只有这两行，没有 per-provider 用量行，也没有「其他」行。请求次数走 `CompactFormatter`，与 token 同一进位数。
 - 本 app **不写日志文件**，也不 `print` 运行时信息（`SelfCheck` 的 `print` 是唯一输出）。
 
 ### 用量桶 / 进度条不变量
 - 12 个 `HourBucket`，索引 0 最旧、末位最新，区间左开右闭 `(startMs, endMs]`；末桶永远是完整一小时（`endMs = nowMs`）。`DailyUsageSnapshot.last5h` = `hourly.suffix(5)` 的并集 = `[now-5h, now]`。
 - 事件 `tsMs < todayStartMs` 不算「今日」但**仍可**进小时桶（窗口可跨零点）；`hoursAgo ∉ [0, 12)` 才丢。去重键 `"\(relPath):\(lineOffset)"`，不要改成其它样式。
+- 请求次数与 token 走**同一套边界、同一个桶轴**（同一个 `TokenStats` 上求和），但时间戳来源不同：`llm.request.time` 是发起时刻、`usage.record.time` 是返回时刻。因此一次跨零点 / 跨桶边界的调用会把请求记在前一个窗口、token 记在后一个窗口（偏差量级 = 单次调用时长）。不要为此引入配对逻辑。
+- 请求次数是**尝试**口径：`llm.request` 行数，含重试与被中断的尝试，也含 `kind=compaction` 的压缩调用。要改成计费口径（= `usage.record` 行数）只需把 `WireLineParser` 里的 `requestCount: 1` 从 `llm.request` 分支挪到 `usage.record` 分支。
 - 段色：`isOK == false` → 强制红；否则 `<70` 绿 / `70–90` 黄 / `>90` 红。
 - 进度条行宽：右区（状态串 / 重置倒计时）按本行文本实测预留（`trailingWidth(for:)`，无文本 0，下限 `minTrailingRegionWidth` 84pt），条长下限 `minBarWidth` 150pt，右区文本距视图右缘 `trailingRightMargin` 20pt；视图宽度取 `minimumWidth(hasLeftLabel:trailingWidth:)`，整行铺满、三窗口正常形态条长一致。**不要**退回「固定预留宽度 + 240pt 底宽」的写法。
 
@@ -113,9 +115,9 @@ make clean   # rm -rf build .build
 | `Refresh/LiveSources.swift` | 生产 `LiveBalanceSource` / `LiveDailyUsageSource` + `humanReadable(_:)` |
 | `Refresh/SnapshotError.swift` | `SnapshotError` + `BalanceCapture` / `BalanceSource` / `BalanceRefreshOutcome` / `DailyUsageSource` |
 | `Refresh/Fakes.swift` | `FakeBalanceSource` / `FakeDailyUsageSource`（SelfCheck 用） |
-| `Usage/WireLineParser.swift` | 单行 `usage.record` → `UsageEvent`（只取 `time` + `usage` 四个计数，不读 `model`） |
-| `Usage/WireLogReader.swift` | 增量读取 + 进程内 Read Cursor + 保留窗口（ADR-0004） |
-| `Usage/HourlyAggregator.swift` | 12 滑动小时桶 + 合并 `today`；不按 provider 分组 |
+| `Usage/WireLineParser.swift` | 单行 `usage.record`（token 四项）/ `llm.request`（`requestCount = 1`）→ `UsageEvent`；只取 `time` 与各自的事实字段，不读 `model` / `modelAlias` / `provider` |
+| `Usage/WireLogReader.swift` | 增量读取 + 进程内 Read Cursor + 保留窗口（ADR-0004）；对两种事件行一视同仁 |
+| `Usage/HourlyAggregator.swift` | 12 滑动小时桶 + 合并 `today`（token 与请求次数同轴求和）；不按 provider 分组 |
 | `Usage/Formatting.swift` | `CompactFormatter.format(Int)` K/M/B + `999_500 → "1.0M"` |
 | `SleepGuard/*.swift` | `SleepGuard`（单会话 IOPMAssertion）/ `IOPMAssertionAdapter`（system + display 成对）/ `SessionExpiryTimer`（一次性到期）/ `CountdownTicker`（1Hz，只在菜单打开期间启停）/ `CountdownFormatter` |
 | `Cleanup/SessionCleanup.swift` | 扫描 + 执行清理（唯一破坏性能力，ADR-0007）；纯 Foundation，`Sendable` 值类型上的 `async` 包装 |
@@ -126,7 +128,7 @@ make clean   # rm -rf build .build
 | `UI/CleanupAlertPresenter.swift` | `NSAlert` 接线（预览 / 结果 / 固定 220pt 可滚动等宽详情区）；LSUIElement 下弹窗前自己抢焦点 |
 | `UI/SettingsWindow.swift` | `SettingsStore`（`@Published` × 镜像 UserDefaults）+ `NSHostingController<SettingsView>`（刷新间隔 + 清理策略两项 `Stepper`） |
 | `Brand/LogoCatalog.swift` | `ProviderID` → `NSImage` 查表 + template 标记；未知 provider 返回 nil |
-| `Resources/Info.plist` | **`LSUIElement=true`**、`CFBundleIdentifier=com.alfred-zhong.kimi-companion`、`CFBundleIconFile=AppIcon`、`LSMinimumSystemVersion=13.0`、版本 `0.3.0`（build `3`，与 `META` 同步） |
+| `Resources/Info.plist` | **`LSUIElement=true`**、`CFBundleIdentifier=com.alfred-zhong.kimi-companion`、`CFBundleIconFile=AppIcon`、`LSMinimumSystemVersion=13.0`、版本 `0.3.1`（build `4`，与 `META` 同步） |
 | `Resources/provider_*.png` | 菜单栏 logo（`@2x` / `@3x`，无 `.color.png` 兜底） |
 | `Resources/AppIcon.icns` | app 图标（`CFBundleIconFile` 指向；Finder / `NSAlert` 用）。由 `Tools/make-appicon.swift` 生成，勿手改 |
 | `Tools/make-appicon.swift` | 图标生成脚本（不在 SwiftPM target 里，`swift Tools/make-appicon.swift` 直接跑；改设计改这里再重新生成） |
@@ -148,7 +150,7 @@ make clean   # rm -rf build .build
 - 无 XCTest / Swift Testing：测试以 **`SelfCheck` 进程级断言**形式存在，由 `--self-check` 调用（`make test` 等价）。
 - 新增断言：在 `SelfCheck.run()` 内追加 `check("...", cond)`（纯函数 + `Bool` 条件）。不要引入 XCTest。
 - 退出码：0 = 全部通过（`[self-check] OK (全部通过)`）；1 = 任意失败（`[self-check] FAIL (N):` + 失败 label）。
-- 覆盖：各 provider 解码 / URL / 凭据预检（含 `Kimi` 三分支与 config `[services.*]` 解析）、`TokenStats` / `CompactFormatter` / `BalanceFormatter` 边界、`HourlyAggregator` 桶边界与跨零点、`WireLineParser` / `WireLogReader` 增量契约、`RefreshController.tick` 编排（成功 / 失败 / 恢复 / stale / 配置缺失）、`StatusBarPresenter` 三渲染函数与菜单结构、`UsageBarMenuItemView` 段色与最小条宽、`SleepGuard` 到期与取消、`LogoCatalog` 资源、app 图标（icns 落地 / magic / `CFBundleIconFile` 同名 / 尺寸档位）、清理（合取四分支 / `humanBytes` / 预览与完成文案 / `session_index.jsonl` 修剪 / 临时目录端到端）。
+- 覆盖：各 provider 解码 / URL / 凭据预检（含 `Kimi` 三分支与 config `[services.*]` 解析）、`TokenStats`（含请求次数不参与 token 派生量）/ `CompactFormatter` / `BalanceFormatter` 边界、`HourlyAggregator` 桶边界与跨零点（含请求次数与 token 同轴）、`WireLineParser` / `WireLogReader` 增量契约（含两种事件行混排）、`RefreshController.tick` 编排（成功 / 失败 / 恢复 / stale / 配置缺失）、`StatusBarPresenter` 三渲染函数与菜单结构、`UsageBarMenuItemView` 段色与最小条宽、`SleepGuard` 到期与取消、`LogoCatalog` 资源、app 图标（icns 落地 / magic / `CFBundleIconFile` 同名 / 尺寸档位）、清理（合取四分支 / `humanBytes` / 预览与完成文案 / `session_index.jsonl` 修剪 / 临时目录端到端）。
 - 手动烟测：`open build/kimi-companion.app` 看菜单栏是否渲染出选中 provider 的余额 / `¥X.XX` / `X%` 与 logo；Finder 里 `build/kimi-companion.app` 是否显示自绘图标（不是通用图标）；「菜单栏显示」三个选项切换是否即时生效并带 ✓；「立即刷新」是否即时重抓；偏好面板档位是否 ~1 个 tick 内生效；「阻止系统休眠」是否变咖啡色胶囊 + ` ☕`、倒计时是否只在菜单打开时走动；「清理 session 文件…」是否弹出预览、点「取消」是否什么都没删。`Kimi` 凭据来自 `[services.moonshot_search]`：改掉 / 删掉那把 `api_key` 应看到 `⚠︎凭据` + 中文说明，而不是空白或 `¥0.00`。
 - **不要**靠 unit test 覆盖率衡量进度；当前靠 `SelfCheck` + 人工菜单栏检查。
 

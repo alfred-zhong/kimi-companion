@@ -24,9 +24,12 @@
 - 一次清理清完全部产物：session 目录、孤儿事件流（`server/events/session_*.jsonl` 中不对应任何现存 session 的，删完目录后重新枚举）、`session_index.jsonl` 里指向已消失目录的行、`file-history/<桶>` 里目录已不存在的账本条目。逐项 best-effort，失败数与失败路径在完成弹窗里上报；`__global__.jsonl` 永不删，`server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspaces.json`、`config.toml` 一律不碰。
 - 清理预览在无可删项时不只说「无需清理」，而是给出可诊断的说明（当前策略 / 现存个数 / 总体积 / 最老年龄）；`sessions` 根目录不存在时也明确说明。检测到 Kimi Code 桌面端在运行会在预览里加一行警告，但不禁用「确定」。
 - 偏好面板新增「工作区保留数」「保留天数」两项 `Stepper`，越界值夹回合法范围后写回 UserDefaults；`保留天数 = 0` 展示为「不限」。
+- 菜单的 `今日` / `近 5h` 两行新增**模型请求次数**：读 `wire.jsonl` 的 `llm.request` 行（与 `usage.record` 同一条流水线、同一套窗口边界），合并口径、不按 Provider / model 区分，行首形如 `今日 · 请求 137 · ↑18.9K · ↓187 · ⚡145.0K · 🎯88%`。口径是**实际发起的调用**——含重试与被中断的尝试，也含 `kind=compaction` 的上下文压缩调用，因此它大于「拿到 usage 的调用数」（本机全量实测 3133 : 3103）。`TokenStats` 相应扩为「窗口用量聚合」（token + 请求次数），请求次数不参与缓存命中率等任何 token 派生量（决策见 `docs/adr/0006-combined-usage.md` 的 Amendments）。
 
 ### 变更
 
+- 用量行的排版变了：请求次数插在最前面（`今日 · 请求N · ↑… · ↓… · ⚡… · 🎯…%`），四项 token 的相对顺序不变。
+- `UsageEvent` 新增 `requestCount` 字段（`llm.request` 行为 `1`、`usage.record` 行为 `0`）；`WireLineParser` 从「只认 `usage.record`」改为「认 `usage.record` + `llm.request`」，`model` / `modelAlias` / `provider` 一律不读的不变量不变。
 - 用量统计不再按 Provider 或 model 区分：下拉菜单里只剩**一份**合并的 `今日` / `近 5h`，位于全部 Provider section 之后、「菜单栏显示」之前。
 - 移除按 `usage.record.model` 的 `<Provider>/` 前缀归属用量的逻辑：`model` 字段不再被读取，`UsageGroup` / 「其他」尾行一并删除；任何 `model` 前缀的记录都计入同一份合计（决策见 `docs/adr/0006-combined-usage.md`，原 `docs/adr/0003-usage-attribution-by-model-prefix.md` 已被取代）。
 - `session_index.jsonl` 修剪改为**只摘掉**「有 `sessionDir` 字段且该目录已不存在」的行：kimi-code 自己写的墓碑行（`{"sessionId":…,"deleted":true}`）、不可解析的行、以及 `sessionDir` 不是非空绝对路径的行一律原样保留（路径形态不对时无法判定目录是否存在，保留一行只是留个残条，删掉一行却可能丢掉活着的 session），不再像脚本那样按 `sessionId` 是否存活整行删除。写前备份为 `session_index.jsonl.bak-<yyyyMMddHHmmss>`（本地时区）而不是会被每次运行覆盖的固定 `.bak` 名，且只有真的有改动时才写文件、才留备份。

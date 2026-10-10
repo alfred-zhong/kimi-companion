@@ -3,8 +3,9 @@ import Foundation
 public let HOUR_BUCKET_COUNT = 12
 public let HOUR_MS: Int64 = 3600 * 1000
 
-/// 把 usage 事件流按「当日」+「12 个滑动小时桶」聚合成**一份合并快照**。
+/// 把 wire 事件流按「当日」+「12 个滑动小时桶」聚合成**一份合并快照**。
 ///
+/// 两种事件（`usage.record` 的 token、`llm.request` 的请求次数）走同一套边界，各自求和。
 /// 不按 provider / model 区分：所有事件无条件求和（ADR-0006）。
 public struct HourlyAggregator: Sendable {
     public init() {}

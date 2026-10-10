@@ -84,15 +84,23 @@ public enum SelfCheck {
         // MARK: - TokenStats
 
         do {
-            let s = TokenStats(inputTokens: 100, outputTokens: 50, cacheCreationTokens: 20, cacheReadTokens: 30)
+            let s = TokenStats(inputTokens: 100, outputTokens: 50, cacheCreationTokens: 20, cacheReadTokens: 30, requestCount: 7)
             check("TokenStats.totalInput", s.totalInputTokens == 150)
             check("TokenStats.realConsumption", s.realConsumptionTokens == 200)
             check("TokenStats.cacheHitRate", abs(TokenStats(inputTokens: 100, cacheReadTokens: 400).cacheHitRate - 0.8) < 1e-9)
             check("TokenStats.zeroHit", TokenStats().cacheHitRate == 0)
             check("TokenStats.isEmpty", TokenStats().isEmpty && !TokenStats(outputTokens: 1).isEmpty)
+            // 请求次数也算「有内容」：只有请求、没有任何 token 时不是空窗口。
+            check("TokenStats.isEmpty.countsRequests", !TokenStats(requestCount: 1).isEmpty)
+            // 请求次数不参与任何 token 派生量。
+            check("TokenStats.requestsDontAffectTokens",
+                  s.totalInputTokens == 150 && s.realConsumptionTokens == 200
+                      && abs(s.cacheHitRate - 30.0 / 150.0) < 1e-9)
             var acc = TokenStats()
-            acc += TokenStats(inputTokens: 1, outputTokens: 2, cacheCreationTokens: 3, cacheReadTokens: 4)
-            check("TokenStats.plusEquals", acc == TokenStats(inputTokens: 1, outputTokens: 2, cacheCreationTokens: 3, cacheReadTokens: 4))
+            acc += TokenStats(inputTokens: 1, outputTokens: 2, cacheCreationTokens: 3, cacheReadTokens: 4, requestCount: 5)
+            acc += TokenStats(requestCount: 6)
+            check("TokenStats.plusEquals", acc == TokenStats(inputTokens: 1, outputTokens: 2, cacheCreationTokens: 3, cacheReadTokens: 4, requestCount: 11))
+            check("TokenStats.plusEquals.requestsSum", acc.requestCount == 11)
         }
 
         // MARK: - CompactFormatter
@@ -836,7 +844,7 @@ public enum SelfCheck {
             check("Source.configMissing.noHTTP", unreadable.capture(for: .deepseek).result == nil)
         }
 
-        // MARK: - WireLineParser（usage.record 解析）
+        // MARK: - WireLineParser（usage.record + llm.request 解析）
 
         do {
             let p = WireLineParser()
@@ -864,15 +872,39 @@ public enum SelfCheck {
             check("Wire.noModelFieldStillParsed",
                   p.parse(line: noModel, relPath: "a", lineOffset: 0)?.stats == TokenStats(inputTokens: 4, outputTokens: 2))
 
-            // 非 usage.record 一律不计（含 metadata / llm.request / agent.message.appended / token_counting.measured）。
+            // 非 usage.record / llm.request 一律不计（含 metadata / agent.message.appended / token_counting.measured）。
             let metadata = #"{"type":"metadata","protocol_version":"1.5","created_at":1790069942091}"#
             check("Wire.skip.metadata", p.parse(line: metadata, relPath: "a", lineOffset: 0) == nil)
-            let llmRequest = #"{"type":"llm.request","provider":"openai","modelAlias":"OpenCode Go/deepseek-v4.1-flash","agentId":"main","time":1}"#
-            check("Wire.skip.llmRequest", p.parse(line: llmRequest, relPath: "a", lineOffset: 0) == nil)
             let appended = #"{"type":"agent.message.appended","kind":"text","agentId":"main","model":"agent-loop","message":{},"time":1}"#
             check("Wire.skip.agentMessage", p.parse(line: appended, relPath: "a", lineOffset: 0) == nil)
             let tokenCounting = #"{"type":"token_counting.measured","agentId":"main","tokens":123456,"time":1}"#
             check("Wire.skip.tokenCounting", p.parse(line: tokenCounting, relPath: "a", lineOffset: 0) == nil)
+            // `llm.tools_snapshot` 与 `llm.request` 前缀相近，但必须是两条不同的行。
+            let toolsSnapshot = #"{"type":"llm.tools_snapshot","agentId":"main","toolsHash":"x","time":1}"#
+            check("Wire.skip.llmToolsSnapshot", p.parse(line: toolsSnapshot, relPath: "a", lineOffset: 0) == nil)
+
+            // `llm.request` = 一次实际发起的调用：只贡献请求计数，token 全 0。
+            let llmRequest = #"{"type":"llm.request","provider":"openai","modelAlias":"OpenCode Go/deepseek-v4.1-flash","agentId":"main","kind":"loop","turnStep":"0.1","time":1791598954798}"#
+            let req = p.parse(line: llmRequest, relPath: "w/s/agents/main/wire.jsonl", lineOffset: 64)
+            check("Wire.request.parsed", req != nil)
+            check("Wire.request.tsMs", req?.tsMs == 1791598954798)
+            check("Wire.request.countsOne", req?.requestCount == 1)
+            check("Wire.request.statsRequestCount", req?.stats.requestCount == 1)
+            check("Wire.request.noTokens", req?.stats.totalInputTokens == 0 && req?.stats.outputTokens == 0)
+            check("Wire.request.dedupeKey", req?.dedupeKey == "w/s/agents/main/wire.jsonl:64")
+            // 归属字段（`model` / `modelAlias` / `provider`）一律不读：另一个前缀产出形状完全相同的请求事件。
+            let otherPrefixRequest = #"{"type":"llm.request","provider":"openai","modelAlias":"DeepSeek/deepseek-flash","agentId":"main","kind":"loop","time":7}"#
+            check("Wire.request.attributionIgnored",
+                  p.parse(line: otherPrefixRequest, relPath: "a", lineOffset: 0)?.stats == TokenStats(requestCount: 1))
+            // 压缩调用（`kind: "compaction"`）也是一次真实请求，照常计入。
+            let compactionRequest = #"{"type":"llm.request","agentId":"main","kind":"compaction","messageCount":263,"time":8}"#
+            check("Wire.request.compactionCounted",
+                  p.parse(line: compactionRequest, relPath: "a", lineOffset: 0)?.stats == TokenStats(requestCount: 1))
+            // `llm.request` 缺 time → 不计（与 usage.record 同一要求）。
+            let requestNoTime = #"{"type":"llm.request","agentId":"main","kind":"loop"}"#
+            check("Wire.request.skip.noTime", p.parse(line: requestNoTime, relPath: "a", lineOffset: 0) == nil)
+            // 反过来：usage.record 不贡献请求计数。
+            check("Wire.usageRecord.countsNoRequest", ev?.requestCount == 0 && ev?.stats.requestCount == 0)
 
             // 缺 time → 不计（不能用别的字段凑时间）。
             let noTime = #"{"type":"usage.record","agentId":"main","model":"DeepSeek/x","usage":{"inputOther":1,"output":1,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn"}"#
@@ -889,9 +921,10 @@ public enum SelfCheck {
         do {
             let nowMs: Int64 = 24 * HOUR_MS
             let todayStartMs: Int64 = 0
-            func event(_ id: String, _ tsMs: Int64, input: Int = 10, output: Int = 1, cacheRead: Int = 0, cacheCreation: Int = 0) -> UsageEvent {
+            func event(_ id: String, _ tsMs: Int64, input: Int = 10, output: Int = 1, cacheRead: Int = 0, cacheCreation: Int = 0, requests: Int = 0) -> UsageEvent {
                 UsageEvent(tsMs: tsMs, inputOther: input, output: output,
-                           cacheRead: cacheRead, cacheCreation: cacheCreation, dedupeKey: id)
+                           cacheRead: cacheRead, cacheCreation: cacheCreation,
+                           requestCount: requests, dedupeKey: id)
             }
             let events: [UsageEvent] = [
                 event("a", nowMs - HOUR_MS / 2, input: 5),
@@ -919,6 +952,40 @@ public enum SelfCheck {
             var union = TokenStats()
             for bucket in snap.hourly.suffix(5) { union += bucket.stats }
             check("Agg.last5h.equalsUnionOfLast5Buckets", snap.last5h == union && union.inputTokens == 15)
+
+            // 请求次数与 token 走同一套边界、同一个桶轴：`llm.request` 事件（token 全 0、requestCount = 1）
+            // 与 `usage.record` 事件一起落桶，两者互不干扰。
+            let requestEvents: [UsageEvent] = [
+                event("r1", nowMs - HOUR_MS / 2, input: 0, output: 0, requests: 1),
+                event("r2", nowMs - 6 * HOUR_MS, input: 0, output: 0, requests: 1),
+                event("r3", nowMs - 4 * HOUR_MS, input: 0, output: 0, requests: 1),
+                event("r4", -HOUR_MS, input: 0, output: 0, requests: 1),
+                event("r5", nowMs - 14 * HOUR_MS, input: 0, output: 0, requests: 1),
+            ]
+            let reqSnap = HourlyAggregator().aggregate(events: requestEvents, nowMs: nowMs, todayStartMs: todayStartMs)
+            // r1+r2+r3+r5 = 4；r4 在今日零点之前，不计（与 token 同一判据）。
+            check("Agg.requests.today", reqSnap.today.requestCount == 4)
+            check("Agg.requests.noTokens", !reqSnap.today.isEmpty && reqSnap.today.totalInputTokens == 0)
+            check("Agg.requests.bucket11", reqSnap.hourly[11].stats.requestCount == 1)
+            check("Agg.requests.bucket7", reqSnap.hourly[7].stats.requestCount == 1)
+            check("Agg.requests.bucket5", reqSnap.hourly[5].stats.requestCount == 1)
+            check("Agg.requests.outOfWindow", reqSnap.hourly.reduce(0) { $0 + $1.stats.requestCount } == 3)
+            check("Agg.requests.last5h", reqSnap.last5h.requestCount == 2)
+            check("Agg.requests.last5hIsUnionOfLast5Buckets",
+                  reqSnap.last5h.requestCount == reqSnap.hourly.suffix(5).reduce(0) { $0 + $1.stats.requestCount })
+
+            // 混合事件流：一次调用留下两条事件（token 一条、请求一条），两条各自求和。
+            let mixed = HourlyAggregator().aggregate(
+                events: [
+                    event("u1", nowMs - 60_000, input: 10, output: 5),
+                    event("q1", nowMs - 60_000, input: 0, output: 0, requests: 1),
+                ],
+                nowMs: nowMs, todayStartMs: todayStartMs
+            )
+            check("Agg.mixed.bothSummed",
+                  mixed.today.inputTokens == 10 && mixed.today.outputTokens == 5 && mixed.today.requestCount == 1)
+            check("Agg.mixed.sameBucket",
+                  mixed.hourly[11].stats.requestCount == 1 && mixed.hourly[11].stats.inputTokens == 10)
 
             // 桶结构不变量：12 桶、步长 1h、索引 0 最旧 / 末位最新、左开右闭、末桶是完整一小时。
             check("Agg.bucket.endMsAxis",
@@ -949,6 +1016,8 @@ public enum SelfCheck {
             check("Agg.empty.structure", emptySnap.hourly.count == HOUR_BUCKET_COUNT)
             check("Agg.empty.zeroed", emptySnap.today.isEmpty && emptySnap.last5h.isEmpty
                 && emptySnap.hourly.allSatisfy { $0.stats.isEmpty })
+            check("Agg.empty.zeroedRequests", emptySnap.today.requestCount == 0 && emptySnap.last5h.requestCount == 0
+                && emptySnap.hourly.allSatisfy { $0.stats.requestCount == 0 })
         }
 
         // MARK: - WireLogReader：增量契约 == 全量重扫
@@ -966,6 +1035,9 @@ public enum SelfCheck {
 
             func line(_ model: String, _ tsMs: Int64, output: Int = 1) -> String {
                 #"{"type":"usage.record","agentId":"main","model":"\#(model)","usage":{"inputOther":10,"output":\#(output),"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":\#(tsMs)}"# + "\n"
+            }
+            func requestLine(_ tsMs: Int64) -> String {
+                #"{"type":"llm.request","agentId":"main","provider":"openai","modelAlias":"DeepSeek/deepseek-flash","kind":"loop","turnStep":"0.1","time":\#(tsMs)}"# + "\n"
             }
             func write(_ rel: String, _ content: String, mtime: Date = now) {
                 let url = root.appendingPathComponent(rel)
@@ -1064,6 +1136,19 @@ public enum SelfCheck {
             let blankReader = WireLogReader(sessionsRoot: root.appendingPathComponent("blank").path)
             check("Reader.blankLines.count", blankReader.events(now: now).count == 1)
             check("Reader.blankLines.parity", keys(blankReader.events(now: now)) == oracle("blank"))
+
+            // 两种事件行混在同一文件里：增量读取、去重、窗口淘汰对 `llm.request` 一视同仁，
+            // 且请求次数与 token 各自求和（token 只来自 usage.record 行）。
+            write("mixed/wd_m_111122223333/session_8/agents/main/wire.jsonl",
+                  line("DeepSeek/deepseek-flash", nowMs - 30_000) + requestLine(nowMs - 25_000))
+            let mixedReader = WireLogReader(sessionsRoot: root.appendingPathComponent("mixed").path)
+            let mixedEvents = mixedReader.events(now: now)
+            check("Reader.mixedKinds.count", mixedEvents.count == 2)
+            check("Reader.mixedKinds.parity", keys(mixedEvents) == oracle("mixed"))
+            check("Reader.mixedKinds.requestsSummed", mixedEvents.reduce(0) { $0 + $1.requestCount } == 1)
+            check("Reader.mixedKinds.tokensUnaffected",
+                  mixedEvents.reduce(0) { $0 + $1.stats.inputTokens } == 10
+                      && mixedEvents.reduce(0) { $0 + $1.stats.outputTokens } == 1)
         }
 
         // MARK: - LiveDailyUsageSource（reader + aggregator 串起来）
@@ -1079,6 +1164,7 @@ public enum SelfCheck {
                 #"{"type":"usage.record","agentId":"main","model":"DeepSeek/deepseek-flash","usage":{"inputOther":10,"output":5,"inputCacheRead":90,"inputCacheCreation":0},"usageScope":"turn","time":\#(nowMs - 30_000)}"#,
                 #"{"type":"usage.record","agentId":"agent-0","model":"OpenCode Go/deepseek-v4.1-flash","usage":{"inputOther":20,"output":7,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":\#(nowMs - 20_000)}"#,
                 #"{"type":"usage.record","agentId":"main","model":"agent-loop","usage":{"inputOther":3,"output":1,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":\#(nowMs - 10_000)}"#,
+                #"{"type":"llm.request","agentId":"main","provider":"openai","modelAlias":"OpenCode Go/deepseek-v4.1-flash","kind":"loop","turnStep":"0.1","time":\#(nowMs - 9_000)}"#,
             ].joined(separator: "\n") + "\n"
             try? Data(content.utf8).write(to: file)
 
@@ -1086,14 +1172,18 @@ public enum SelfCheck {
             let (snap, err) = sync { await source.capture(now: now) }
             check("DailySource.noError", err == nil)
             check("DailySource.snapshot", snap != nil)
-            // 三条记录各带不同的 `model` 前缀（DeepSeek / OpenCode Go / 不匹配任何 Provider 的 agent-loop），
-            // 全部并入同一份合计：input 10+20+3 = 33，output 5+7+1 = 13，cacheRead 90。
+            // 三条 usage.record 各带不同的 `model` 前缀（DeepSeek / OpenCode Go / 不匹配任何 Provider 的 agent-loop），
+            // 全部并入同一份合计：input 10+20+3 = 33，output 5+7+1 = 13，cacheRead 90；
+            // 另有一条 llm.request，只贡献 1 次请求、不贡献任何 token。
             check("DailySource.combined",
-                  snap?.today == TokenStats(inputTokens: 33, outputTokens: 13, cacheReadTokens: 90))
+                  snap?.today == TokenStats(inputTokens: 33, outputTokens: 13, cacheReadTokens: 90, requestCount: 1))
             check("DailySource.combined.bothKnownPrefixesCounted", snap?.today.inputTokens == 10 + 20 + 3)
             check("DailySource.combined.unmatchedPrefixNotDropped", snap?.today.inputTokens != 10 + 20)
             check("DailySource.combined.notSinglePrefix", snap?.today.inputTokens != 20 + 3)
             check("DailySource.hitRate", abs((snap?.today.cacheHitRate ?? 0) - 90.0 / 123.0) < 1e-9)
+            // 请求次数不随 token 走：3 条 usage.record + 1 条 llm.request → 只有 1 次请求。
+            check("DailySource.requestCount", snap?.today.requestCount == 1)
+            check("DailySource.requestCount.notUsageRecordCount", snap?.today.requestCount != 3)
         }
 
         // MARK: - Caffeinate / Countdown
@@ -1287,9 +1377,9 @@ public enum SelfCheck {
             ]
             let ocOK = BalanceResult(provider: .opencodeGo, balance: 16, currency: .percent, usedPercent: 16, quotaWindows: windows)
             // 用量只有合并的一份：today 与「后 5 桶」刻意给不同值，好把两行区分开。
-            let lastBucketStats = TokenStats(inputTokens: 1_000, outputTokens: 20, cacheReadTokens: 4_000)
+            let lastBucketStats = TokenStats(inputTokens: 1_000, outputTokens: 20, cacheReadTokens: 4_000, requestCount: 9)
             let daily = DailyUsageSnapshot(
-                today: TokenStats(inputTokens: 18_938, outputTokens: 187, cacheReadTokens: 145_024),
+                today: TokenStats(inputTokens: 18_938, outputTokens: 187, cacheReadTokens: 145_024, requestCount: 137),
                 hourly: (0..<HOUR_BUCKET_COUNT).map { index in
                     HourBucket(startMs: 0, endMs: 0,
                                stats: index == HOUR_BUCKET_COUNT - 1 ? lastBucketStats : TokenStats())
@@ -1348,10 +1438,16 @@ public enum SelfCheck {
             ])
 
             // 用量：只有一份合并块，位于**全部** provider section 之后、「菜单栏显示」之前。
-            let todayRow = "今日 · ↑18.9K · ↓187 · ⚡145.0K · 🎯88%"
-            let last5hRow = "近 5h · ↑1.0K · ↓20 · ⚡4.0K · 🎯80%"
+            // 每行五段，第一段是请求次数（`llm.request` 行数）。
+            let todayRow = "今日 · 请求 137 · ↑18.9K · ↓187 · ⚡145.0K · 🎯88%"
+            let last5hRow = "近 5h · 请求 9 · ↑1.0K · ↓20 · ⚡4.0K · 🎯80%"
             check("Menu.usage.todayRow", titles.contains(todayRow))
             check("Menu.usage.last5hRow", titles.contains(last5hRow))
+            check("Menu.usage.requestsLeadTheRow",
+                  todayRow.hasPrefix("今日 · 请求 ") && last5hRow.hasPrefix("近 5h · 请求 "))
+            check("Menu.usage.requestsExactlyOnce",
+                  todayRow.components(separatedBy: "请求").count == 2
+                      && last5hRow.components(separatedBy: "请求").count == 2)
             check("Menu.usage.exactlyOneTodayRow", titles.filter { $0.hasPrefix("今日") }.count == 1)
             check("Menu.usage.exactlyOneLast5hRow", titles.filter { $0.hasPrefix("近 5h") }.count == 1)
             // provider section 里不再有各自的用量行：全菜单只有这两行用量。
@@ -1372,12 +1468,12 @@ public enum SelfCheck {
                 check("Menu.usage.blockLocated", false)
             }
 
-            // 空用量也照常渲染一份合并块（全零），不会因为「没有归属」而消失。
+            // 空用量也照常渲染一份合并块（全零，含请求次数 0），不会因为「没有归属」而消失。
             let emptyDaily = DailyUsageSnapshot(today: TokenStats(), hourly: [], capturedAt: now)
             let emptyTitles = StatusBarPresenter.renderMenu(.init(daily: emptyDaily), now: now).map(\.title)
             check("Menu.usage.emptyStillRendersCombined",
-                  emptyTitles.contains("今日 · ↑0 · ↓0 · ⚡0 · 🎯0%")
-                  && emptyTitles.contains("近 5h · ↑0 · ↓0 · ⚡0 · 🎯0%"))
+                  emptyTitles.contains("今日 · 请求 0 · ↑0 · ↓0 · ⚡0 · 🎯0%")
+                  && emptyTitles.contains("近 5h · 请求 0 · ↑0 · ↓0 · ⚡0 · 🎯0%"))
 
             // is_available: false → 仍展示金额，并追加 ⚠。
             let unavailable = BalanceResult(provider: .deepseek, balance: 65.92, currency: .cny, isAvailable: false)

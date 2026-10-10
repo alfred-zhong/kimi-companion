@@ -37,3 +37,15 @@ token 用量只保留**一份**合并的数字，不再按 provider / model 区�
   2. `usage.record` 是**单次 LLM 调用的增量**而不是累计快照（同一 session 的 `output` 序列实测非单调：187 → 165 → 170 → 1654 → …）——因此直接按字段求和，不做差分。合并统计不会改变这一点。
 - 0003 里「`llm.request.provider` 恒为 `"openai"`」的实测结论仍然成立，但现在只是**历史依据**：既然不做归属，这个字段连考虑都不需要考虑。
 - 若将来又要按 provider 拆开用量，需要重新引入一个归属依据；现有的 `model` 前缀方案已被判定为「不值得为它维护一整套分组代码」。
+
+## Amendments
+
+### 请求次数并入同一份合并统计（2026-10-10）
+
+菜单的 `今日` / `近 5h` 两行在 token 计数之外增加**模型请求次数**，仍是合并口径、不按 provider / model 区分——理由与 token 完全一致：读者要的是「今天用了多少」，不是「每个 provider 各用了多少」。
+
+- `WireLineParser` 现在认两种行：`usage.record`（贡献 token 四项，`requestCount = 0`）与 `llm.request`（`requestCount = 1`，token 全 0）。一条行只产出一个 `UsageEvent`，两种事实各自求和；去重键、保留窗口、mtime 剪枝、桶边界一律不变。
+- 口径是**尝试**而非**计费**：`llm.request` 在请求发起前落盘，重试（`turn.step.retrying`）与被中断（`turn.step.interrupted` / `turn.cancel` / `prompt.aborted`）的尝试只有它、没有对应的 `usage.record`（实测某 session：一个 step 重试 5 次共 6 条 `llm.request`、1 条 `usage.record`）。因此这个数**大于**「拿到 usage 的调用数」——本机全量实测 3133 : 3103。要改成计费口径，把 `requestCount: 1` 从 `llm.request` 分支挪到 `usage.record` 分支即可（单点改动）。
+- `kind: "compaction"` 的上下文压缩调用也计入——它同样是一次真实的模型请求。
+- `TokenStats` 因此从「纯 token 聚合」扩为「窗口用量聚合」（token + 请求次数）。请求次数不参与 `cacheHitRate` / `totalInputTokens` / `realConsumptionTokens` 等任何 token 派生量；`isEmpty` 把它算作「有内容」（只有请求、没有 token 的窗口不是空窗口）。
+- 已知偏差：`llm.request.time` 是发起时刻、`usage.record.time` 是返回时刻，一次跨零点或跨桶边界的调用会把「请求」记在前一个窗口、「token」记在后一个窗口。偏差量级是单次调用的时长（秒级），不影响日 / 小时粒度。**不为此引入配对逻辑**——配对会把重试与中断的尝试重新变成不可见的量，正好丢掉这个指标最有价值的部分。

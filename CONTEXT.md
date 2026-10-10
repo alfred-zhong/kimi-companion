@@ -80,8 +80,16 @@ _Avoid_: 会话日志、transcript、日志文件
 Wire Log 里一条 `usage.record` 行：单次 LLM 调用的**增量**（不是累计快照），携带四个 token 计数。其中的 `model` 字段**不被读取**——用量不按模型或 Provider 区分。
 _Avoid_: 用量快照、累计用量
 
+**Model Request**:
+Wire Log 里一条 `llm.request` 行：一次**实际发起**的模型调用，在请求发出前写入，携带发起时刻。与 Usage Record 是两条行、两种事实——重试与被中断的尝试只有 Model Request、没有 Usage Record。其中的 `modelAlias` / `provider` 字段**不被读取**。
+_Avoid_: 请求日志、API 调用记录
+
+**Request Count**:
+一段窗口内 Model Request 的条数，即实际发起的模型调用次数；含重试与被中断的尝试，也含上下文压缩调用。因此它**大于**「拿到 usage 的调用数」。与 token 同为合并口径。
+_Avoid_: 调用次数、计费次数、请求数
+
 **Daily Usage**:
-当日（本地零点至此刻）全部会话的 token 合计，**一份合并**的数字，不按 Provider 或模型区分。
+当日（本地零点至此刻）全部会话的 token 合计与 Request Count，**一份合并**的数字，不按 Provider 或模型区分。
 _Avoid_: 今天用量、今日统计
 
 **Last-5h Usage**:
@@ -89,7 +97,7 @@ _Avoid_: 今天用量、今日统计
 _Avoid_: 近五小时、5 小时用量
 
 **Token Stats**:
-一段窗口（合并统计，不区分 Provider / 模型）的 token 四元组：输入（非缓存）、输出、缓存创建、缓存读取。
+一段窗口（合并统计，不区分 Provider / 模型）的用量聚合：token 四元组（输入（非缓存）、输出、缓存创建、缓存读取）加 Request Count。Request Count 不参与缓存命中率等任何 token 派生量。
 _Avoid_: 用量统计、token 数
 
 **Cache Hit Rate**:

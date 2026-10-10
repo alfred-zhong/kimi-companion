@@ -242,8 +242,8 @@ public enum StatusBarPresenter {
     /// Kimi
     ///   余额 ¥49.59 [⚠]
     /// ──────
-    /// 今日 · ↑… · ↓… · ⚡… · 🎯…%
-    /// 近 5h · …
+    /// 今日 · 请求 … · ↑… · ↓… · ⚡… · 🎯…%
+    /// 近 5h · 请求 … · …
     /// ──────
     /// 菜单栏显示 ▸ (DeepSeek / OpenCode Go / Kimi，选中打 ✓)
     /// ──────
@@ -319,7 +319,7 @@ public enum StatusBarPresenter {
         return items
     }
 
-    /// 合并用量块：今日 + 近 5h，不区分 provider / model。
+    /// 合并用量块：今日 + 近 5h，不区分 provider / model。每行是「请求次数 + 四项 token」。
     /// 快照缺失时退化为错误行；两者都没有则不占位（调用方不追加分隔线）。
     private static func usageItems(_ inputs: Inputs) -> [MenuItemSpec] {
         if let daily = inputs.daily {
@@ -379,10 +379,11 @@ public enum StatusBarPresenter {
         )
     }
 
-    /// `今日 · ↑in · ↓out · ⚡cacheRead · 🎯hit%`
+    /// `今日 · 请求 N · ↑in · ↓out · ⚡cacheRead · 🎯hit%`
     private static func dailyLine(prefix: String, stats: TokenStats) -> String {
         let hit = CompactFormatter.format(Int((stats.cacheHitRate * 100).rounded()))
-        return "\(prefix) · ↑\(CompactFormatter.format(stats.inputTokens))"
+        return "\(prefix) · 请求 \(CompactFormatter.format(stats.requestCount))"
+            + " · ↑\(CompactFormatter.format(stats.inputTokens))"
             + " · ↓\(CompactFormatter.format(stats.outputTokens))"
             + " · ⚡\(CompactFormatter.format(stats.cacheReadTokens))"
             + " · 🎯\(hit)%"

@@ -248,23 +248,30 @@ public struct ProviderBalanceState: Equatable, Sendable {
 
 // MARK: - Token Usage
 
-/// 一段时间窗口的 token 聚合。
+/// 一段时间窗口的用量聚合：token 计数 + 模型请求次数。
+///
+/// 两项同源（同一份 wire 事件流、同一套窗口边界），因此放在一起求和，不另开并行数组。
 public struct TokenStats: Equatable, Sendable {
     public var inputTokens: Int
     public var outputTokens: Int
     public var cacheCreationTokens: Int
     public var cacheReadTokens: Int
+    /// 窗口内实际发起的模型调用次数（`llm.request` 行数）：含重试与被中断的尝试，也含上下文压缩调用。
+    /// 因此它**大于**「拿到 usage 的调用数」——后者等于 `usage.record` 行数。不参与任何 token 派生量。
+    public var requestCount: Int
 
     public init(
         inputTokens: Int = 0,
         outputTokens: Int = 0,
         cacheCreationTokens: Int = 0,
-        cacheReadTokens: Int = 0
+        cacheReadTokens: Int = 0,
+        requestCount: Int = 0
     ) {
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.cacheCreationTokens = cacheCreationTokens
         self.cacheReadTokens = cacheReadTokens
+        self.requestCount = requestCount
     }
 
     public var totalInputTokens: Int {
@@ -283,6 +290,7 @@ public struct TokenStats: Equatable, Sendable {
 
     public var isEmpty: Bool {
         inputTokens == 0 && outputTokens == 0 && cacheCreationTokens == 0 && cacheReadTokens == 0
+            && requestCount == 0
     }
 
     public static func += (lhs: inout TokenStats, rhs: TokenStats) {
@@ -290,6 +298,7 @@ public struct TokenStats: Equatable, Sendable {
         lhs.outputTokens += rhs.outputTokens
         lhs.cacheCreationTokens += rhs.cacheCreationTokens
         lhs.cacheReadTokens += rhs.cacheReadTokens
+        lhs.requestCount += rhs.requestCount
     }
 }
 
@@ -308,7 +317,7 @@ public struct HourBucket: Equatable, Sendable {
 
 /// 日用量快照：全部会话合并成**一份**，不按 provider / model 区分（ADR-0006）。
 public struct DailyUsageSnapshot: Sendable, Equatable {
-    /// 当日（本地零点至 `capturedAt`）全部会话的 token 合计。
+    /// 当日（本地零点至 `capturedAt`）全部会话的 token 与请求次数合计。
     public let today: TokenStats
     /// 长度 12，index 0 最旧、末位最新；区间左开右闭 `(startMs, endMs]`；末桶是完整一小时。
     public let hourly: [HourBucket]
