@@ -19,11 +19,12 @@
 - app 图标：新增 `Resources/AppIcon.icns`（16…1024 全档位）与生成脚本 `Tools/make-appicon.swift`（`swift Tools/make-appicon.swift` 可重新生成），`Info.plist` 声明 `CFBundleIconFile=AppIcon`，`build.sh` 一并复制进 bundle —— Finder 与清理预览 / 结果弹窗（`NSAlert` 默认取 app 图标）不再显示通用图标。图形是原创的（不借用任何 Provider 的品牌 mark，同 `LogoCatalog` 的原则）：macOS 标准 824 网格的圆角方形 + 三条白色配额条（对应菜单里每个 Provider 的余额 / 配额行），带 16 / 32 两个小尺寸的简化档（去掉轨道，只留实心条）。`SelfCheck` 断言 icns 存在、`icns` magic、`Info.plist` 声明与实际文件同名、尺寸档位齐全。
 - 一键构建：`./build.sh`（编译 + 复制 `Resources/*.png` / `*.icns` + 拼 `.app` bundle + ad-hoc 签名）。
 - 自检入口：`swift run kimi-companion --self-check`，覆盖格式化 / 响应解码 / 用量合并口径 / 增量读取契约 / tick 状态机 / 菜单与状态栏渲染 / 守护路径 / 清理策略与产物修剪。
-- 菜单新增 `清理 session 文件…`（`立即刷新` 之后、独立成组、无快捷键）：点击后先在后台扫描 `~/.kimi-code`，弹出预览（相当于脚本的 `--dry-run`，只列将被删除的 session，按工作区分组并给出可回收体积），用户点「确定」才真删，点「取消」什么都不做；删完再弹结果，并触发一次完整刷新。这是 app 唯一的破坏性能力（决策见 `docs/adr/0007-session-cleanup-in-app.md`）。
-- 清理策略两道参数 + 一道常量：**工作区保留数**（默认 3，范围 1…20）与**保留天数**（默认 7，范围 0…365，`0` 表示不限），另加写死的 30 分钟活跃保护。判定是合取——只有「不在保留名额内」「距最后更新 ≥ 30 分钟」「已满保留天数」三条同时成立才删，每个工作区永远保留最新 1 个。
-- 一次清理清完全部产物：session 目录、孤儿事件流（`server/events/session_*.jsonl` 中不对应任何现存 session 的，删完目录后重新枚举）、`session_index.jsonl` 里指向已消失目录的行、`file-history/<桶>` 里目录已不存在的账本条目。逐项 best-effort，失败数与失败路径在完成弹窗里上报；`__global__.jsonl` 永不删，`server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspaces.json`、`config.toml` 一律不碰。
-- 清理预览在无可删项时不只说「无需清理」，而是给出可诊断的说明（当前策略 / 现存个数 / 总体积 / 最老年龄）；`sessions` 根目录不存在时也明确说明。检测到 Kimi Code 桌面端在运行会在预览里加一行警告，但不禁用「确定」。
-- 偏好面板新增「工作区保留数」「保留天数」两项 `Stepper`，越界值夹回合法范围后写回 UserDefaults；`保留天数 = 0` 展示为「不限」。
+- 菜单新增 `清理 session 文件…`（`立即刷新` 之后、独立成组、无快捷键）：点击后先在后台扫描 `~/.kimi-code`，弹出预览（相当于脚本的 `--dry-run`，分别列出将被删除的 session 与将被注销的空工作区），用户点「确定」才真删 / 真注销，点「取消」什么都不做；删完再弹结果，并触发一次完整刷新。这是 app 唯一的破坏性能力（决策见 `docs/adr/0007-session-cleanup-in-app.md`、`docs/adr/0009-empty-workspace-cleanup.md`）。
+- 清理策略两道参数 + 一道常量：**工作区保留数**（默认 3，范围 0…20，`0` = 不保留名额）与**保留天数**（默认 7，范围 0…365，`0` 表示不限），另加写死的 30 分钟活跃保护。判定是合取——只有「不在保留名额内」「距最后更新 ≥ 30 分钟」「已满保留天数」三条同时成立才删；Keep Count 调到 0 只取消第一道门槛，另外两道仍生效。
+- 一次清理清完全部产物：session 目录、孤儿事件流（`server/events/session_*.jsonl` 中不对应任何现存 session 的，删完目录后重新枚举）、`session_index.jsonl` 里指向已消失目录的行、`file-history/<桶>` 里目录已不存在的账本条目，以及**空工作区**。逐项 best-effort，失败数与失败路径在完成弹窗里上报；`__global__.jsonl` 永不删，`server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspace-trust/`、`config.toml` 一律不碰。
+- 新增空工作区清理（决策见 `docs/adr/0009-empty-workspace-cleanup.md`）：本次删除后一个注册工作区在所有 alias bucket 里都没有 session 目录时，从 `~/.kimi-code/workspaces.json` 注销——移除同 root 的全部 alias 条目、把相关 id 写进 `deleted_workspace_ids` 防止 desktop 启动时从 index 补录，并删除空 bucket 与空 `file-history` 账本。`root` 目录本身不删，重新打开文件夹可恢复注册。预览单独列节、与 session 删除共用一次确认；执行前重新读取并只注销「此刻仍为空」的工作区；写前备份为 `workspaces.json.bak-<yyyyMMddHHmmss>`，原子替换，保留未知字段；文件缺失 / 损坏时跳过工作区移除，绝不重建。检测到 Kimi Code 桌面端在运行时，只删 session、跳过全部工作区级动作，预览与结果都说明「退出后再次清理」。desktop 的工作区列表通常要重启 / resync 后才刷新。
+- 清理预览在无可删项时不只说「无需清理」，而是给出可诊断的说明（当前策略 / 现存个数 / 总体积 / 最老年龄）；没有 session 但有可移除的空工作区时，预览仍然可确认。`sessions` 根目录不存在时也明确说明。检测到 Kimi Code 桌面端在运行会在预览里加一行警告，但不禁用「确定」。
+- 偏好面板新增「工作区保留数」「保留天数」两项 `Stepper`，越界值夹回合法范围后写回 UserDefaults；`保留天数 = 0` 展示为「不限」，`工作区保留数 = 0` 展示为「不保留」。
 - 菜单的 `今日` / `近 5h` 两行新增**模型请求次数**：读 `wire.jsonl` 的 `llm.request` 行（与 `usage.record` 同一条流水线、同一套窗口边界），合并口径、不按 Provider / model 区分，行首形如 `今日 · 请求 137 · ↑18.9K · ↓187 · ⚡145.0K · 🎯88%`。口径是**实际发起的调用**——含重试与被中断的尝试，也含 `kind=compaction` 的上下文压缩调用，因此它大于「拿到 usage 的调用数」（本机全量实测 3133 : 3103）。`TokenStats` 相应扩为「窗口用量聚合」（token + 请求次数），请求次数不参与缓存命中率等任何 token 派生量（决策见 `docs/adr/0006-combined-usage.md` 的 Amendments）。
 
 ### 变更
@@ -33,7 +34,9 @@
 - 用量统计不再按 Provider 或 model 区分：下拉菜单里只剩**一份**合并的 `今日` / `近 5h`，位于全部 Provider section 之后、「菜单栏显示」之前。
 - 移除按 `usage.record.model` 的 `<Provider>/` 前缀归属用量的逻辑：`model` 字段不再被读取，`UsageGroup` / 「其他」尾行一并删除；任何 `model` 前缀的记录都计入同一份合计（决策见 `docs/adr/0006-combined-usage.md`，原 `docs/adr/0003-usage-attribution-by-model-prefix.md` 已被取代）。
 - `session_index.jsonl` 修剪改为**只摘掉**「有 `sessionDir` 字段且该目录已不存在」的行：kimi-code 自己写的墓碑行（`{"sessionId":…,"deleted":true}`）、不可解析的行、以及 `sessionDir` 不是非空绝对路径的行一律原样保留（路径形态不对时无法判定目录是否存在，保留一行只是留个残条，删掉一行却可能丢掉活着的 session），不再像脚本那样按 `sessionId` 是否存活整行删除。写前备份为 `session_index.jsonl.bak-<yyyyMMddHHmmss>`（本地时区）而不是会被每次运行覆盖的固定 `.bak` 名，且只有真的有改动时才写文件、才留备份。
-- 偏好窗口从 360×96 放大到 420×170，容纳清理策略两项参数。
+- `workspaces.json` 从「绝不触碰」改为**唯一受控写入的元数据文件**：只允许空工作区注销路径读写，遵守「有改动才写 + 写前备份 + 原子替换 + apply 前重新读取复审 + desktop 运行中跳过」；`workspace-trust/` 明确加入绝不触碰清单。
+- 工作区保留数的合法范围从 `1…20` 放宽到 `0…20`，`RetentionPolicy` 的下限从 `1` 改为 `0`；`0` 不再保留最新 1 个，但 30 分钟活跃保护与保留天数仍然生效。
+- 偏好窗口从 360×96 放大到 420×210，容纳清理策略两项参数与更长的说明文字。
 
 ### Bug 修复
 

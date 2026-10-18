@@ -145,19 +145,43 @@ kimi-code 的一次对话在磁盘上的记录目录，位于某个 Workspace Bu
 _Avoid_: 会话、session（裸用）、对话、线程
 
 **Workspace**:
-Chat Session 的归属单位，取 `state.json` 的 `cwd`（绝对路径）；缺失时退化为 Workspace Bucket 的名字。同一 Workspace 的 Chat Session 共享一份 file-history 账本。
-_Avoid_: 工作目录、项目、仓库
+Chat Session 的归属单位，取 `state.json` 的 `cwd`（绝对路径）；缺失时退化为 Workspace Bucket 的名字。它是 Retention Policy 的分组单位，不等同于 desktop 侧边栏里的 Registered Workspace。
+_Avoid_: 工作目录、项目、仓库、侧边栏条目
 
-**Workspace Bucket**:
-`sessions/` 下的一级目录（形如 `wd_<目录名>_<hash>`），是 Chat Session 的物理容器，也是 file-history 账本的文件名。
-_Avoid_: 工作区分组、桶
+**Workspace Registry**:
+`~/.kimi-code/workspaces.json`，kimi-code desktop 侧边栏的工作区注册表；顶层是 `workspaces`（id → root / name / 时间戳）与 `deleted_workspace_ids`。它不存 session 列表。
+_Avoid_: 工作区配置、workspace 数据库
+
+**Registered Workspace**:
+Workspace Registry 里的一条 root 记录，是 UI 真正显示的单位；同一个 root 可以有多条 alias 记录，但它们算同一个工作区。
+_Avoid_: 工作区条目、UI 工作区、注册项
+
+**Workspace Alias**:
+指向同一个 root 的多个 Workspace Registry id / Workspace Bucket。注销工作区时所有 alias id 会一起写进 Workspace Tombstone。
+_Avoid_: 别名、重复工作区、旧 id
+
+**Workspace Tombstone**:
+`deleted_workspace_ids` 里的一个 id，用来阻止 kimi-code desktop 启动时从 `session_index.jsonl` 自动补录回已注销的工作区。重新打开该文件夹会清除 tombstone 并重新注册。
+_Avoid_: 删除标记、墓碑记录、黑名单
+
+**Empty Workspace**:
+一个 Registered Workspace 在本次清理计划执行后，其所有 alias bucket 里都没有任何 Chat Session 目录。root 目录不存在也算空。与「这个 Workspace 没有可删的 session」不是一回事。
+_Avoid_: 空目录、无会话工作区、废弃工作区
+
+**Empty Bucket**:
+没有任何非隐藏内容的 Workspace Bucket（只剩 `.DS_Store` 也算空）。
+_Avoid_: 空桶、空文件夹、残留目录
+
+**Workspace Removal**:
+把一个 Empty Workspace 从 Workspace Registry 注销、写入 Workspace Tombstone，并回收它的 Empty Bucket 与空 `file-history` 账本。不删除 root 目录本身；只在 Cleanup Preview 确认后、且 Kimi Code desktop 未运行时发生。
+_Avoid_: 删除工作区、删文件夹、删项目
 
 **Retention Policy**:
 判定一个 Chat Session 该不该被清理的规则：Keep Count、30 分钟活跃保护、Retention Days 三道门槛**全部**通过才删除。三道门槛是合取关系，不是任选其一。
 _Avoid_: 保留策略、清理规则、TTL、Retained Window
 
 **Keep Count**:
-每个 Workspace 保留的最近 Chat Session 个数（默认 3，下限 1）；排名在名额内的 Chat Session 永远不删。
+每个 Workspace 保留的最近 Chat Session 个数（默认 3，范围 0…20）；排名在名额内的 Chat Session 不删。`0` 表示不保留任何 session（名额门槛消失），但另外两道门槛仍然生效。
 _Avoid_: 保留数、数量上限、保留份数
 
 **Retention Days**:
@@ -165,11 +189,11 @@ _Avoid_: 保留数、数量上限、保留份数
 _Avoid_: 保留天数、保留期、过期天数、Retained Window
 
 **Cleanup Plan**:
-一次扫描的完整判定结果：每个 Chat Session 的保留 / 删除结论与原因、孤儿产物清单、可回收体积；纯数据，不产生任何副作用。
+一次扫描的完整判定结果：每个 Chat Session 的保留 / 删除结论与原因、将注销的 Empty Workspace、待清理的 Empty Bucket、孤儿产物清单、可回收体积，以及 Workspace Registry 的读取问题；纯数据，不产生任何副作用。
 _Avoid_: 清理列表、dry-run 结果、删除清单
 
 **Cleanup Preview**:
-把 Cleanup Plan 呈现给用户并等待确认的弹窗，只列将被删除的 Chat Session；用户取消则什么都不做。删除**只能**从这里发生。
+把 Cleanup Plan 呈现给用户并等待确认的弹窗，分别列出将被删除的 Chat Session 与将被注销的 Empty Workspace；用户取消则什么都不做。删除与注销**只能**从这里发生。
 _Avoid_: 确认框、提示、预览页
 
 **Protected Chat Session**:

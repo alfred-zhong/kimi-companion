@@ -52,8 +52,8 @@ public enum CleanupPresenter {
 
     /// 预览弹窗内容。
     ///
-    /// - 有可删除项：汇总一行 + 按工作区分组的明细（**只列将删除的 session**）+ 确定 / 取消。
-    /// - 无可删除项：只给诊断文案，按钮只有一个「好」（不显示「无需清理」这种无信息的空话）。
+    /// - 有可删除项 / 可移除的空工作区：汇总 + 明细 + 确定 / 取消。
+    /// - 两者都没有：只给诊断文案，按钮只有一个「好」（不显示「无需清理」这种无信息的空话）。
     /// - Parameter desktopRunning: Kimi Code 桌面端是否在运行（由调用方用 `NSWorkspace` 判断后注入）。
     public static func previewContent(
         plan: CleanupPlan,
@@ -61,7 +61,9 @@ public enum CleanupPresenter {
         now: Date,
         desktopRunning: Bool
     ) -> CleanupAlertContent {
-        guard plan.deletionCount > 0 else {
+        let hasSessions = plan.deletionCount > 0
+        let hasWorkspaces = plan.workspaceRemovalCount > 0 || !plan.staleBucketIds.isEmpty
+        guard hasSessions || hasWorkspaces else {
             return CleanupAlertContent(
                 title: previewTitle,
                 info: noDeletionDiagnostic(plan: plan, policy: policy),
@@ -69,13 +71,33 @@ public enum CleanupPresenter {
                 confirmable: false
             )
         }
-        var info = "将删除 \(plan.deletionCount) 个 session，释放 \(humanBytes(plan.reclaimableBytes))；"
-            + "保留 \(plan.totalSessionCount - plan.deletionCount) 个。"
-        if desktopRunning { info += "\n" + runningWarning() }
+
+        var info = hasSessions
+            ? "将删除 \(plan.deletionCount) 个 session，释放 \(humanBytes(plan.reclaimableBytes))；"
+                + "保留 \(plan.totalSessionCount - plan.deletionCount) 个。"
+            : "没有可删除的 session。"
+        if plan.workspaceRemovalCount > 0 {
+            info += desktopRunning
+                ? "\n有 \(plan.workspaceRemovalCount) 个空工作区可移除；Kimi Code 桌面端正在运行，本次跳过。"
+                : "\n将移除 \(plan.workspaceRemovalCount) 个空工作区。"
+        }
+        if !plan.staleBucketIds.isEmpty {
+            info += desktopRunning
+                ? "\n有 \(plan.staleBucketIds.count) 个已移除工作区的空目录可清理；本次跳过。"
+                : "\n将清理 \(plan.staleBucketIds.count) 个已移除工作区的空目录。"
+        }
+        if desktopRunning && hasSessions { info += "\n" + runningWarning() }
+        if let issue = plan.workspaceCatalogIssue {
+            info += "\n⚠ 工作区注册表读取失败，本次不会移除空工作区：\(issue)"
+        }
+
+        let detail = [deletionListing(plan: plan, now: now), workspaceListing(plan: plan, desktopRunning: desktopRunning)]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
         return CleanupAlertContent(
             title: previewTitle,
             info: info,
-            detail: deletionListing(plan: plan, now: now),
+            detail: detail.isEmpty ? nil : detail,
             confirmable: true
         )
     }
@@ -84,16 +106,26 @@ public enum CleanupPresenter {
     /// 否则用户只会看到一句「无需清理」，无法判断是策略太宽还是真的干净。
     public static func noDeletionDiagnostic(plan: CleanupPlan, policy: RetentionPolicy) -> String {
         let head = "按当前策略（\(policyLabel(policy))）没有可清理的 session。"
-        guard plan.totalSessionCount > 0 else { return head + "未找到任何 session。" }
-        return head
-            + "现存 \(plan.totalSessionCount) 个，共 \(humanBytes(plan.totalBytes))，"
-            + "最老的 \(String(format: "%.1f", plan.oldestAgeDays)) 天。"
+        var text: String
+        if plan.totalSessionCount > 0 {
+            text = head
+                + "现存 \(plan.totalSessionCount) 个，共 \(humanBytes(plan.totalBytes))，"
+                + "最老的 \(String(format: "%.1f", plan.oldestAgeDays)) 天。"
+        } else {
+            text = head + "未找到任何 session。"
+        }
+        if let issue = plan.workspaceCatalogIssue {
+            text += "\n工作区注册表读取失败：\(issue)"
+        }
+        return text
     }
 
-    /// `每工作区保留 3 个 / 早于 7 天`；`retentionDays == 0` 展示为「不限天数」。
+    /// `每工作区保留 3 个 / 早于 7 天`；`keepCount == 0` 展示为「每工作区不保留」，
+    /// `retentionDays == 0` 展示为「不限天数」。
     public static func policyLabel(_ policy: RetentionPolicy) -> String {
+        let keep = policy.keepCount == 0 ? "每工作区不保留" : "每工作区保留 \(policy.keepCount) 个"
         let days = policy.retentionDays == 0 ? "不限天数" : "早于 \(policy.retentionDays) 天"
-        return "每工作区保留 \(policy.keepCount) 个 / \(days)"
+        return "\(keep) / \(days)"
     }
 
     /// 将删除 session 的分组明细（滚动区文本）。
@@ -113,9 +145,35 @@ public enum CleanupPresenter {
         return lines.joined(separator: "\n")
     }
 
+    /// 将移除的空工作区 / 将清理的空目录（滚动区文本）。
+    public static func workspaceListing(plan: CleanupPlan, desktopRunning: Bool = false) -> String {
+        var lines: [String] = []
+        if !plan.workspaceRemovals.isEmpty {
+            lines.append("── 空工作区（\(plan.workspaceRemovals.count) 个）")
+            let prefix = desktopRunning ? "[本次跳过]" : "[将移除]"
+            for removal in plan.workspaceRemovals {
+                var line = "\(prefix) \(removal.root)"
+                if !removal.rootExists { line += "（目录已不存在）" }
+                lines.append(line)
+            }
+        }
+        if !plan.staleBucketIds.isEmpty {
+            if !lines.isEmpty { lines.append("") }
+            lines.append("── 已移除工作区的空目录（\(plan.staleBucketIds.count) 个）")
+            let prefix = desktopRunning ? "[本次跳过]" : "[将清理]"
+            for id in plan.staleBucketIds { lines.append("\(prefix) \(id)") }
+        }
+        return lines.joined(separator: "\n")
+    }
+
     /// 桌面端在运行时的一行警告。**只是警告，不禁用「确定」**（D4：清理由用户决定）。
     public static func runningWarning() -> String {
         "⚠ Kimi Code 桌面端正在运行，正在使用的会话可能受影响。"
+    }
+
+    /// 桌面端在运行时跳过工作区级动作的说明（预览 / 完成弹窗共用）。
+    public static func workspaceSkipWarning() -> String {
+        "Kimi Code 桌面端正在运行：本次不会移除空工作区，退出后再次清理即可。"
     }
 
     // MARK: - 告知（无「确定 / 取消」）
@@ -139,11 +197,23 @@ public enum CleanupPresenter {
 
     /// 完成弹窗内容：一行结果 + 一行产物计数（可为 0）+ 有失败时列出前 3 条失败路径。
     public static func completionContent(_ outcome: CleanupOutcome) -> CleanupAlertContent {
-        let info = "已删除 \(outcome.deletedSessionCount) 个 session，"
-            + "释放 \(humanBytes(outcome.reclaimedBytes))；\(outcome.failures.count) 个删除失败\n"
+        var info = "已删除 \(outcome.deletedSessionCount) 个 session，"
+            + "释放 \(humanBytes(outcome.reclaimedBytes))；"
+            + "移除 \(outcome.removedWorkspaceCount) 个空工作区；"
+            + "\(outcome.failures.count) 个操作失败\n"
             + "session_index.jsonl 移除 \(outcome.indexRecordsRemoved) 条记录；"
             + "file-history 清理 \(outcome.fileHistoryIdsRemoved) 条条目；"
-            + "孤儿事件文件 \(outcome.deletedEventJournalCount) 个"
+            + "孤儿事件文件 \(outcome.deletedEventJournalCount) 个；"
+            + "空 bucket \(outcome.deletedEmptyBucketCount) 个；"
+            + "空账本 \(outcome.deletedEmptyLedgerCount) 个"
+        if outcome.workspaceActionsSkipped { info += "\n" + workspaceSkipWarning() }
+        if outcome.removedWorkspaceCount > 0 {
+            info += "\n工作区列表可能需要重启 Kimi Code 后才会刷新。"
+        }
+        if let issue = outcome.workspaceCatalogIssue { info += "\n工作区注册表未改动：\(issue)" }
+        if outcome.skippedWorkspaceCount > 0 {
+            info += "\n\(outcome.skippedWorkspaceCount) 个工作区因仍有 session 未移除。"
+        }
         let detail = outcome.failures.isEmpty
             ? nil
             : outcome.failures.prefix(3).map { "失败：\($0)" }.joined(separator: "\n")

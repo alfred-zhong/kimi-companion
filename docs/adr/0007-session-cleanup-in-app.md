@@ -4,7 +4,7 @@ app 新增**唯一一项破坏性能力**：按显式的 Retention Policy 删除
 
 ## Status
 
-已采纳（Accepted）。
+已采纳（Accepted）。其中「`workspaces.json` 绝不触碰」与「Keep Count 下限 1」两条已被 [0009](0009-empty-workspace-cleanup.md) 取代；其余决策继续有效。
 
 ## Context
 
@@ -37,17 +37,17 @@ app 新增**唯一一项破坏性能力**：按显式的 Retention Policy 删除
 
 - **触发**：菜单新增 `清理 session 文件…`（`立即刷新` 之后、独立成组、无快捷键）。菜单每次打开都会重建，因此这一项永远是最新的、无需失效通知。
 - **流程**：点击 → 后台线程扫描 → **Cleanup Preview**（只列将被删除的 Chat Session，按 Workspace 分组）→ 用户「确定」才执行，「取消」什么都不做 → 执行完成后再弹结果。这是 app 的第一个 modal（`NSAlert` + 可滚动 accessory view）；因为是 `LSUIElement`，弹之前必须 `NSApp.activate(ignoringOtherApps: true)`。
-- **Retention Policy 是合取**（照脚本，保守）：按 `state.json.cwd`（兜底桶目录名）分组，组内按 `updatedAt` 降序，第 `rank` 个在 `rank ≥ max(keepCount, 1)` **且** 距更新 ≥ 30 分钟 **且** `retentionDays == 0` 或 `ageDays ≥ retentionDays` 时才删除。`keepCount` 下限 1；`retentionDays = 0` 表示不限。
+- **Retention Policy 是合取**（照脚本，保守）：按 `state.json.cwd`（兜底桶目录名）分组，组内按 `updatedAt` 降序，第 `rank` 个在 `rank ≥ max(keepCount, 1)` **且** 距更新 ≥ 30 分钟 **且** `retentionDays == 0` 或 `ageDays ≥ retentionDays` 时才删除。`keepCount` 下限 1；`retentionDays = 0` 表示不限。**（0009 已把下限放宽到 0；`0` 只取消名额门槛。）**
 - **30 分钟活跃保护是写死的常量，不进偏好设置**：它是磁盘上唯一能近似「这个 Chat Session 正在被写」的信号，不该允许用户关掉。
-- **偏好设置**只暴露两个参数：Keep Count（默认 3，范围 1…20）与 Retention Days（默认 7，范围 0…365，`0` 展示为「不限」）。
+- **偏好设置**只暴露两个参数：Keep Count（默认 3，范围 1…20）与 Retention Days（默认 7，范围 0…365，`0` 展示为「不限」）。**（0009 已把 Keep Count 范围放宽到 0…20。）**
 - **产物处理**（一次点击全做完，逐项 best-effort、失败计数上报，一个删不掉不毁整次清理）：
   1. 删 Chat Session 目录；
   2. 删**孤儿事件流**：`server/events/session_*.jsonl` 中不对应任何现存 Chat Session 的（删完目录后重新枚举，覆盖本次删除的与历史遗留的）。**`__global__.jsonl` 永不删**；不匹配 `session_*.jsonl` 的文件永不入选；
   3. 修剪 `session_index.jsonl`：**只移除「有 `sessionDir` 字段且该目录已不存在」的行**；无 `sessionDir` 字段的行（kimi-code 自己写的墓碑行 `{"sessionId":…,"deleted":true}`）与不可解析的行一律原样保留；
   4. 修剪 `file-history/<Bucket>`：摘掉「`<Bucket>/<id>` 目录已不存在」的条目（含历史遗留的僵尸条目）。
 - **写文件的纪律**：一律原子写（先写 `.tmp` 再替换）；**只有真的有改动时才写**；`session_index.jsonl` 写前备份为 `session_index.jsonl.bak-<时间戳>` —— **不用脚本的固定 `.bak` 名**，因为它会被每次运行覆盖，销毁上一份历史备份（用户现存那份 61 行的备份就只剩这一份）。
-- **绝不触碰**：`server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspaces.json`、`config.toml`。
-- **kimi-code 运行中不阻止**：检测到 `com.kimi.code.desktop` 时在预览里给一行建议退出的警告，但不禁用「确定」。
+- **绝不触碰**：`server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspaces.json`、`config.toml`。**（0009 把 `workspaces.json` 改为空工作区注销路径的唯一受控写入例外；`workspace-trust/` 继续绝不触碰。）**
+- **kimi-code 运行中不阻止**：检测到 `com.kimi.code.desktop` 时在预览里给一行建议退出的警告，但不禁用「确定」。**（0009：desktop 运行时跳过工作区级动作，只删 session。）**
 - **完成后触发一次完整刷新**（与「立即刷新」同路径），使菜单里的用量数字与被删掉的数据一致。
 - **不接受残留风险**：一个 Chat Session 若 7 天没动但仍被 kimi-code 打开着（例如挂在标签页里），它会被判定为可删 —— 磁盘上没有任何信号能区分这种情况，只能靠上面的警告与 30 分钟保护缩小概率。
 

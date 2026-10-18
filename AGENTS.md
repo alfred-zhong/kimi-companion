@@ -1,6 +1,6 @@
 # kimi-companion — Agent 手册
 
-> 面向 AI 助手的仓库协作手册。补充人类规范；不重复常识。决策缘由见 `docs/adr/0001-0008`（0003 已被 0006 取代）。
+> 面向 AI 助手的仓库协作手册。补充人类规范；不重复常识。决策缘由见 `docs/adr/0001-0009`（0003 已被 0006 取代；0007 的两条被 0009 取代）。
 
 macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 kimi-code desktop 所用第三方 provider 的余额 / 配额，加一份**合并的** token 用量与模型请求次数（不区分 provider / model）。每 30 / 60 / 120s 刷新（默认 60s）。抓取失败永不空白：菜单栏显示 `?kimi` / `⚠︎<短标签>`，菜单给出可照抄去改配置的中文说明。
 
@@ -11,16 +11,22 @@ macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 kimi-code 
 
 - **凭据**：只读 `~/.kimi-code/config.toml` 的内联 `api_key`（ADR-0002）。通用来源 `[providers.<段名>]`；`[services.moonshot_search]` / `[services.moonshot_fetch]` 是**只服务 `Kimi` 的例外**（ADR-0008），不得扩展成通用凭据通道。不写回该文件、不读 Keychain、不读 `api_key_env`（不 `getenv`）、不碰 kimi-code 本地 HTTP server（`server/instances/*.json`、`server.token`、`mcp.json`）。
 - **用量是合并的一份**（ADR-0006）：`usage.record`（token）与 `llm.request`（请求次数）无条件求和，不按 provider / model 分组，`model` / `modelAlias` / `provider` 字段完全不读。菜单里 provider section 只放余额 / 配额；用量块（`今日` / `近 5h`）独立成段，放在所有 section 之后。请求次数是**尝试**口径（含重试与被中断的尝试），因此大于「拿到 usage 的调用数」。
-- **无磁盘缓存**：每 tick 实时查 provider + 增量读会话日志，Read Cursor 只在进程内（ADR-0004）。不写 `~/Library/Caches/<bundle-id>/`。唯一持久化是 UserDefaults（刷新间隔 / 选中 provider / 清理策略）。
+- **无磁盘缓存**：每 tick 实时查 provider + 增量读会话日志，Read Cursor 只在进程内（ADR-0004）。不写 `~/Library/Caches/<bundle-id>/`。运行期持久化只有 UserDefaults（刷新间隔 / 选中 provider / 清理策略）；清理动作的受控写盘是唯一例外（`workspaces.json` / `session_index.jsonl` / `file-history`，ADR-0007 / 0009）。
 - **菜单栏 provider 是显式选择**（ADR-0005）：`default_model` 推导只在首启用一次，此后用户选择优先，provider 失败绝不自动切换 `selectedProvider`。
 - **不 shell-out 任何上游 CLI**。新增 provider 只需枚举 case + `BalanceProvider.fetch`，外加在 `LiveBalanceSource.captureOne` 的穷尽 `switch` 里声明凭据来源（漏了会编译失败）。
 - `ProviderBalanceState.isStale` 是余额侧唯一的退化路径：失败但有旧值时保留旧值并标注。
 
-## 唯一的破坏性能力：清理 Chat Session（ADR-0007）
+## 唯一的破坏性能力：清理 Chat Session / 空工作区（ADR-0007、ADR-0009）
 
-菜单 `清理 session 文件…` → 后台扫描 → Cleanup Preview → 用户点「确定」才真删（点「取消」什么都不做）→ 结果弹窗 + 完整刷新一次。机制是**直接删文件系统**，不走 kimi-code 本地 HTTP 删除接口、不 shell-out 任何外部进程。策略是**合取**（Keep Count ∧ 30 分钟活跃保护 ∧ Retention Days），参数在偏好面板，30 分钟活跃保护是写死的常量。**删除不可撤销**。
+菜单 `清理 session 文件…` → 后台扫描 → Cleanup Preview → 用户点「确定」才真删 / 真注销（点「取消」什么都不做）→ 结果弹窗 + 完整刷新一次。机制是**直接删文件系统 + 受控写 `workspaces.json`**，不走 kimi-code 本地 HTTP 删除接口、不 shell-out 任何外部进程。策略是**合取**（Keep Count ∧ 30 分钟活跃保护 ∧ Retention Days），参数在偏好面板，30 分钟活跃保护是写死的常量。**删除与注销不可撤销**（重新打开文件夹可恢复工作区注册，但 session 不会回来）。
 
-绝不触碰：`server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspaces.json`、`config.toml`、`server/events/__global__.jsonl`。`session_index.jsonl` 修剪只摘「有 `sessionDir` 字段且该目录不存在」的行；墓碑行（无 `sessionDir`）与不可解析的行原样保留；有改动才写，写前备份为 `…bak-<时间戳>`。
+- Keep Count 默认 3、范围 0…20；`0` 只取消保留名额，30 分钟活跃保护与 Retention Days 仍生效。
+- 空工作区 = 本次删除计划执行后，其所有 alias bucket 都没有任何 Chat Session 目录；root 不存在也算空。预览单独列节，与 session 删除共用一次确认。
+- 注销纪律：只移除同 root 的全部注册条目并写入 `deleted_workspace_ids`（含注册表 alias id、`session_index.jsonl` 同 `workDir` 的 bucket id、扫描时捕获的 alias id）；有改动才写，写前备份为 `workspaces.json.bak-<时间戳>`，`.tmp` 原子替换；apply 前重新读取并只注销「此刻仍注册且仍为空」的工作区。
+- Kimi Code desktop 运行时**只删 session**，跳过全部工作区级动作（不写 `workspaces.json`、不删空 bucket / 空账本），预览与结果都明说「退出后再次清理」。desktop 的 renderer 不会立即刷新工作区列表，通常需要重启 / resync 才看到消失。
+- `workspaces.json` 缺失 / 损坏 / 不可写：跳过工作区移除并报原因，绝不重建或覆盖；session 删除照常。
+
+绝不触碰：`server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspace-trust/`、`config.toml`、`server/events/__global__.jsonl`。`workspaces.json` 是**唯一例外**：只允许上述空工作区注销路径读写，且遵守备份 / 原子写 / 复审纪律。`session_index.jsonl` 修剪只摘「有 `sessionDir` 字段且该目录不存在」的行；墓碑行（无 `sessionDir`）与不可解析的行原样保留；有改动才写，写前备份为 `…bak-<时间戳>`。
 
 ## 架构 / 数据流
 
@@ -34,8 +40,10 @@ tick: balanceSource.capture → config.load → 逐 provider[凭据来源判定 
         → MainActor.run { state.applyBalance(balanceOutcome(for:)) }
       dailySource.capture → reader.events → aggregator.aggregate → (DailyUsageSnapshot, nil)
         → MainActor.run { applyDaily(snap:err:) }
-清理: cleanup.scan(now:policy:) → CleanupPlan → CleanupPresenter.previewContent → NSAlert
-        → 用户「确定」→ cleanup.apply(plan:now:) → CleanupOutcome → 结果 → controller.tick()
+清理: cleanup.scan(now:policy:) → CleanupPlan（session 判定 + 空工作区 / 空 bucket + 注册表问题）
+        → CleanupPresenter.previewContent(desktopRunning:) → NSAlert
+        → 用户「确定」→ cleanup.apply(plan:now:allowWorkspaceRemoval: !isDesktopRunning())
+        → CleanupOutcome → 结果 → controller.tick()
 ```
 
 DI 全走构造器注入，无 Service Locator / 全局单例。
@@ -105,7 +113,7 @@ make clean   # rm -rf build .build
 |---|---|
 | `App.swift` | `@main` 入口 + DI 装配 + `--self-check` 分派 + 最小主菜单（含「编辑」，偏好窗口才能 Cmd+V） |
 | `RefreshController.swift` | tick 编排 + `AppState`（`ObservableObject`，6 个 `@Published`） |
-| `SelfCheck.swift` | 进程级断言入口（`static run() -> Int`，697 个 `check(...)` 调用点） |
+| `SelfCheck.swift` | 进程级断言入口（`static run() -> Int`，784 个 `check(...)` 调用点） |
 | `Model/Models.swift` | 共享值类型：`ProviderID` / `MenuBarSelection` / `BalanceResult` / `QuotaWindow` / `ProviderFailure` / `ProviderCapture` / `ProviderBalanceState` / `TokenStats` / `HourBucket` / `DailyUsageSnapshot` / `CaffeinateBucket` / `CaffeinateSession` / `RefreshInterval` |
 | `Balance/Providers.swift` | `BalanceProvider` 协议 + `DeepSeekProvider` + `OpenCodeGoProvider` + `KimiProvider` + `jsonDouble` + `BalanceRegistry` + `normalizeBaseURL` |
 | `Balance/CredentialSource.swift` | 凭据路径解析（`resolve(_ name:)`）：裸段名查 `[providers.*]`，`services.<段名>` 查 `[services.*]`（`Kimi` 专用） |
@@ -120,19 +128,19 @@ make clean   # rm -rf build .build
 | `Usage/HourlyAggregator.swift` | 12 滑动小时桶 + 合并 `today`（token 与请求次数同轴求和）；不按 provider 分组 |
 | `Usage/Formatting.swift` | `CompactFormatter.format(Int)` K/M/B + `999_500 → "1.0M"` |
 | `SleepGuard/*.swift` | `SleepGuard`（单会话 IOPMAssertion）/ `IOPMAssertionAdapter`（system + display 成对）/ `SessionExpiryTimer`（一次性到期）/ `CountdownTicker`（1Hz，只在菜单打开期间启停）/ `CountdownFormatter` |
-| `Cleanup/SessionCleanup.swift` | 扫描 + 执行清理（唯一破坏性能力，ADR-0007）；纯 Foundation，`Sendable` 值类型上的 `async` 包装 |
-| `Cleanup/CleanupPresenter.swift` | 清理的全部用户可见文案（纯函数、无 AppKit）：`humanBytes` / `previewContent` / `noDeletionDiagnostic` / `completionContent` |
+| `Cleanup/SessionCleanup.swift` | 扫描 + 执行清理（唯一破坏性能力，ADR-0007 / 0009）：session 目录 / 孤儿事件 / 索引 / 账本 + 空工作区注销与空 bucket / 空账本；纯 Foundation，`Sendable` 值类型上的 `async` 包装 |
+| `Cleanup/CleanupPresenter.swift` | 清理的全部用户可见文案（纯函数、无 AppKit）：`humanBytes` / `previewContent` / `noDeletionDiagnostic` / `workspaceListing` / `completionContent` |
 | `UI/StatusBarController.swift` | `NSStatusItem` + `NSMenu` + `Timer` + Combine sink；`cleanupSessions()` 编排「扫描 → 预览 → 执行 → 结果」，带 `cleanupInFlight` 重入闸 |
 | `UI/StatusBarPresenter.swift` | 纯函数展示层：`renderTitle` / `renderChrome` / `renderMenu` + `MenuItemSpec` / `UsageBarSpec` |
 | `UI/UsageBarMenuItemView.swift` | 自绘用量进度条菜单项（轨道 + 段色填充 + 重置倒计时） |
 | `UI/CleanupAlertPresenter.swift` | `NSAlert` 接线（预览 / 结果 / 固定 220pt 可滚动等宽详情区）；LSUIElement 下弹窗前自己抢焦点 |
-| `UI/SettingsWindow.swift` | `SettingsStore`（`@Published` × 镜像 UserDefaults）+ `NSHostingController<SettingsView>`（刷新间隔 + 清理策略两项 `Stepper`） |
+| `UI/SettingsWindow.swift` | `SettingsStore`（`@Published` × 镜像 UserDefaults）+ `NSHostingController<SettingsView>`（刷新间隔 + 清理策略两项 `Stepper`；Keep Count 范围 `0…20`，`0` 显示「不保留」） |
 | `Brand/LogoCatalog.swift` | `ProviderID` → `NSImage` 查表 + template 标记；未知 provider 返回 nil |
-| `Resources/Info.plist` | **`LSUIElement=true`**、`CFBundleIdentifier=com.alfred-zhong.kimi-companion`、`CFBundleIconFile=AppIcon`、`LSMinimumSystemVersion=13.0`、版本 `0.3.1`（build `4`，与 `META` 同步） |
+| `Resources/Info.plist` | **`LSUIElement=true`**、`CFBundleIdentifier=com.alfred-zhong.kimi-companion`、`CFBundleIconFile=AppIcon`、`LSMinimumSystemVersion=13.0`、版本 `0.4.0`（build `5`，与 `META` 同步） |
 | `Resources/provider_*.png` | 菜单栏 logo（`@2x` / `@3x`，无 `.color.png` 兜底） |
 | `Resources/AppIcon.icns` | app 图标（`CFBundleIconFile` 指向；Finder / `NSAlert` 用）。由 `Tools/make-appicon.swift` 生成，勿手改 |
 | `Tools/make-appicon.swift` | 图标生成脚本（不在 SwiftPM target 里，`swift Tools/make-appicon.swift` 直接跑；改设计改这里再重新生成） |
-| `docs/adr/0001-0008-*.md` | 现行决策记录（见文首） |
+| `docs/adr/0001-0009-*.md` | 现行决策记录（见文首；0007 的两条被 0009 取代） |
 | `Package.swift` / `Package.resolved` / `Makefile` / `build.sh` | SwiftPM 入口（`swift-tools-version: 5.9`，macOS `.v13`，唯一外部依赖 `TOMLKit`）/ 锁定 TOMLKit 0.6.0（随仓库提交）/ 常用命令 / 构建 + 拼 `.app`（复制 `Resources/*.png` + `*.icns`）+ ad-hoc 签名 |
 
 ## 运行 / 工具链
@@ -150,8 +158,8 @@ make clean   # rm -rf build .build
 - 无 XCTest / Swift Testing：测试以 **`SelfCheck` 进程级断言**形式存在，由 `--self-check` 调用（`make test` 等价）。
 - 新增断言：在 `SelfCheck.run()` 内追加 `check("...", cond)`（纯函数 + `Bool` 条件）。不要引入 XCTest。
 - 退出码：0 = 全部通过（`[self-check] OK (全部通过)`）；1 = 任意失败（`[self-check] FAIL (N):` + 失败 label）。
-- 覆盖：各 provider 解码 / URL / 凭据预检（含 `Kimi` 三分支与 config `[services.*]` 解析）、`TokenStats`（含请求次数不参与 token 派生量）/ `CompactFormatter` / `BalanceFormatter` 边界、`HourlyAggregator` 桶边界与跨零点（含请求次数与 token 同轴）、`WireLineParser` / `WireLogReader` 增量契约（含两种事件行混排）、`RefreshController.tick` 编排（成功 / 失败 / 恢复 / stale / 配置缺失）、`StatusBarPresenter` 三渲染函数与菜单结构、`UsageBarMenuItemView` 段色与最小条宽、`SleepGuard` 到期与取消、`LogoCatalog` 资源、app 图标（icns 落地 / magic / `CFBundleIconFile` 同名 / 尺寸档位）、清理（合取四分支 / `humanBytes` / 预览与完成文案 / `session_index.jsonl` 修剪 / 临时目录端到端）。
-- 手动烟测：`open build/kimi-companion.app` 看菜单栏是否渲染出选中 provider 的余额 / `¥X.XX` / `X%` 与 logo；Finder 里 `build/kimi-companion.app` 是否显示自绘图标（不是通用图标）；「菜单栏显示」三个选项切换是否即时生效并带 ✓；「立即刷新」是否即时重抓；偏好面板档位是否 ~1 个 tick 内生效；「阻止系统休眠」是否变咖啡色胶囊 + ` ☕`、倒计时是否只在菜单打开时走动；「清理 session 文件…」是否弹出预览、点「取消」是否什么都没删。`Kimi` 凭据来自 `[services.moonshot_search]`：改掉 / 删掉那把 `api_key` 应看到 `⚠︎凭据` + 中文说明，而不是空白或 `¥0.00`。
+- 覆盖：各 provider 解码 / URL / 凭据预检（含 `Kimi` 三分支与 config `[services.*]` 解析）、`TokenStats`（含请求次数不参与 token 派生量）/ `CompactFormatter` / `BalanceFormatter` 边界、`HourlyAggregator` 桶边界与跨零点（含请求次数与 token 同轴）、`WireLineParser` / `WireLogReader` 增量契约（含两种事件行混排）、`RefreshController.tick` 编排（成功 / 失败 / 恢复 / stale / 配置缺失）、`StatusBarPresenter` 三渲染函数与菜单结构、`UsageBarMenuItemView` 段色与最小条宽、`SleepGuard` 到期与取消、`LogoCatalog` 资源、app 图标（icns 落地 / magic / `CFBundleIconFile` 同名 / 尺寸档位）、清理（合取四分支 / Keep Count 0 / `humanBytes` / 预览与完成文案 / `session_index.jsonl` 修剪 / 空工作区注销与复审 / alias tombstone / `workspaces.json` 备份与未知字段保留 / 损坏注册表跳过 / 临时目录端到端）。
+- 手动烟测：`open build/kimi-companion.app` 看菜单栏是否渲染出选中 provider 的余额 / `¥X.XX` / `X%` 与 logo；Finder 里 `build/kimi-companion.app` 是否显示自绘图标（不是通用图标）；「菜单栏显示」三个选项切换是否即时生效并带 ✓；「立即刷新」是否即时重抓；偏好面板档位是否 ~1 个 tick 内生效（工作区保留数能减到「不保留」）；「阻止系统休眠」是否变咖啡色胶囊 + ` ☕`、倒计时是否只在菜单打开时走动；「清理 session 文件…」是否弹出预览、点「取消」是否什么都没删；预览里是否单独列出空工作区、确认后 `workspaces.json` 是否留下 `.bak-<时间戳>`、重启 Kimi Code 后空工作区是否从侧边栏消失。`Kimi` 凭据来自 `[services.moonshot_search]`：改掉 / 删掉那把 `api_key` 应看到 `⚠︎凭据` + 中文说明，而不是空白或 `¥0.00`。
 - **不要**靠 unit test 覆盖率衡量进度；当前靠 `SelfCheck` + 人工菜单栏检查。
 
 ## 提交前

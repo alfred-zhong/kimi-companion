@@ -10,7 +10,8 @@ private let cleanupDayMs: Double = 86_400_000
 /// 判定是**合取**（AND）：名额内 → 保留；否则最近活跃 → 保留；否则在保留天数内 → 保留；
 /// 三条都不成立才删。因此调大任一参数都只会删得更少。
 public struct RetentionPolicy: Equatable, Sendable {
-    /// 每个工作区保留最近 N 个 session。下限 1：每工作区永远保留最新 1 个。
+    /// 每个工作区保留最近 N 个 session。`0` 表示不保留任何 session（名额门槛消失），
+    /// 但 30 分钟活跃保护与 Retention Days 仍然生效。
     public var keepCount: Int
     /// 只删除最后更新早于 N 天的 session；`0` 表示不限天数（越老越删）。
     public var retentionDays: Int
@@ -21,7 +22,7 @@ public struct RetentionPolicy: Equatable, Sendable {
     public static let `default` = RetentionPolicy()
 
     public init(keepCount: Int = 3, retentionDays: Int = 7) {
-        self.keepCount = max(keepCount, 1)
+        self.keepCount = max(keepCount, 0)
         self.retentionDays = max(retentionDays, 0)
     }
 }
@@ -96,6 +97,31 @@ public struct WorkspaceGroup: Equatable, Sendable {
     public var deletionBytes: Int { deletionItems.reduce(0) { $0 + $1.record.byteSize } }
 }
 
+/// 一个需要在 `workspaces.json` 里注销的空工作区。
+///
+/// 空 = 该 root 对应的所有 alias bucket 里都没有任何 Chat Session 目录。
+/// `aliasIds` 包含注册表条目 id 与 `session_index.jsonl` 推导出的 bucket id；
+/// 注销时它们会一起写进 `deleted_workspace_ids`，防止 desktop 启动时从 index 自动补录回来。
+public struct WorkspaceRemoval: Equatable, Sendable {
+    /// 注册表里代表该 root 的 id（同 root 多条目时优先无尾斜杠者，再按 id 字典序）。
+    public let id: String
+    /// `workspaces.json` 的 `root`，原样保留。
+    public let root: String
+    public let name: String
+    /// 同 root 的全部 id（注册表 alias + index 推导出的 bucket id）。
+    public let aliasIds: [String]
+    /// root 目录当前是否存在；不存在也算空，只用于预览文案。
+    public let rootExists: Bool
+
+    public init(id: String, root: String, name: String, aliasIds: [String], rootExists: Bool) {
+        self.id = id
+        self.root = root
+        self.name = name
+        self.aliasIds = aliasIds
+        self.rootExists = rootExists
+    }
+}
+
 /// 一次扫描的完整计划（相当于脚本的 dry-run 结果）。
 public struct CleanupPlan: Equatable, Sendable {
     /// 全部工作区；含一个都不删的组（诊断文案要用到总数 / 总体积）。
@@ -110,6 +136,12 @@ public struct CleanupPlan: Equatable, Sendable {
     public let oldestAgeDays: Double
     public let deletionCount: Int
     public let reclaimableBytes: Int
+    /// 将要从 `workspaces.json` 注销的空工作区（按 root 去重）。
+    public let workspaceRemovals: [WorkspaceRemoval]
+    /// `deleted_workspace_ids` 里、磁盘上仍留有空的 bucket 的 id。
+    public let staleBucketIds: [String]
+    /// 读 `workspaces.json` 失败的原因；nil = 已成功读取。读失败时不做工作区移除。
+    public let workspaceCatalogIssue: String?
 
     public init(
         groups: [WorkspaceGroup],
@@ -119,7 +151,10 @@ public struct CleanupPlan: Equatable, Sendable {
         totalBytes: Int,
         oldestAgeDays: Double,
         deletionCount: Int,
-        reclaimableBytes: Int
+        reclaimableBytes: Int,
+        workspaceRemovals: [WorkspaceRemoval] = [],
+        staleBucketIds: [String] = [],
+        workspaceCatalogIssue: String? = nil
     ) {
         self.groups = groups
         self.orphanEventJournals = orphanEventJournals
@@ -129,12 +164,17 @@ public struct CleanupPlan: Equatable, Sendable {
         self.oldestAgeDays = oldestAgeDays
         self.deletionCount = deletionCount
         self.reclaimableBytes = reclaimableBytes
+        self.workspaceRemovals = workspaceRemovals
+        self.staleBucketIds = staleBucketIds
+        self.workspaceCatalogIssue = workspaceCatalogIssue
     }
 
     /// 将被删除的全部 session（按组顺序展开）。
     public var deletionItems: [CleanupPlanItem] {
         groups.flatMap(\.deletionItems)
     }
+
+    public var workspaceRemovalCount: Int { workspaceRemovals.count }
 }
 
 /// 一次真正执行的结果。逐项 best-effort：单项失败不中断整次清理，只累进 `failures`。
@@ -145,6 +185,18 @@ public struct CleanupOutcome: Equatable, Sendable {
     public let reclaimedBytes: Int
     public let fileHistoryIdsRemoved: Int
     public let indexRecordsRemoved: Int
+    /// 从 `workspaces.json` 注销的工作区数（按 root 计，不按 alias 条目计）。
+    public let removedWorkspaceCount: Int
+    /// 删掉的空 bucket 目录数。
+    public let deletedEmptyBucketCount: Int
+    /// 删掉的空 `file-history/<bucket>` 账本数。
+    public let deletedEmptyLedgerCount: Int
+    /// 复审时发现「已经有 session 了」而跳过的工作区数（预览与执行之间状态变化）。
+    public let skippedWorkspaceCount: Int
+    /// true = 因为 Kimi Code 桌面端在运行，本次跳过了全部工作区级动作。
+    public let workspaceActionsSkipped: Bool
+    /// `workspaces.json` 未改动的原因（缺失 / 损坏 / 写入失败）；nil = 正常。
+    public let workspaceCatalogIssue: String?
     /// 失败项的可读描述（路径 + 原因），供完成弹窗列出前几条。
     public let failures: [String]
 
@@ -154,7 +206,13 @@ public struct CleanupOutcome: Equatable, Sendable {
         reclaimedBytes: Int,
         fileHistoryIdsRemoved: Int,
         indexRecordsRemoved: Int,
-        failures: [String]
+        failures: [String],
+        removedWorkspaceCount: Int = 0,
+        deletedEmptyBucketCount: Int = 0,
+        deletedEmptyLedgerCount: Int = 0,
+        skippedWorkspaceCount: Int = 0,
+        workspaceActionsSkipped: Bool = false,
+        workspaceCatalogIssue: String? = nil
     ) {
         self.deletedSessionCount = deletedSessionCount
         self.deletedEventJournalCount = deletedEventJournalCount
@@ -162,6 +220,12 @@ public struct CleanupOutcome: Equatable, Sendable {
         self.fileHistoryIdsRemoved = fileHistoryIdsRemoved
         self.indexRecordsRemoved = indexRecordsRemoved
         self.failures = failures
+        self.removedWorkspaceCount = removedWorkspaceCount
+        self.deletedEmptyBucketCount = deletedEmptyBucketCount
+        self.deletedEmptyLedgerCount = deletedEmptyLedgerCount
+        self.skippedWorkspaceCount = skippedWorkspaceCount
+        self.workspaceActionsSkipped = workspaceActionsSkipped
+        self.workspaceCatalogIssue = workspaceCatalogIssue
     }
 }
 
@@ -187,8 +251,10 @@ public enum SessionCleanupError: Error, Sendable, Equatable {
 ///
 /// **直接操作文件系统**，复刻 `kimi-sessions-cleanup.py` 的能力：不走 kimi-code 本地 HTTP
 /// server、不 shell-out、不启任何外部进程。只碰 session 目录、孤儿事件 journal、
-/// `session_index.jsonl` 与 `file-history/<桶>` 账本；其余（`server/instances/`、`server.token`、
-/// `mcp.json`、`search-index/`、`workspaces.json`、`config.toml`、`events/__global__.jsonl`）一律不碰。
+/// `session_index.jsonl`、`file-history/<桶>` 账本，以及**空工作区**在 `workspaces.json`
+/// 里的注册条目与 `deleted_workspace_ids` 墓碑（受控写入见 ADR-0009）。
+/// 其余（`server/instances/`、`server.token`、`mcp.json`、`search-index/`、`config.toml`、
+/// `events/__global__.jsonl`、`workspace-trust/`）一律不碰。
 ///
 /// 两个方法都是**同步阻塞 I/O 的 `async` 包装**（照 `LiveDailyUsageSource.capture` 的先例）：
 /// 调用方在非主线程 await 即可离开主线程，不引入 `DispatchQueue` / `actor`。
@@ -219,6 +285,8 @@ public struct SessionCleanup: Sendable {
     private var fileHistoryDirectory: URL {
         kimiCodeHome.appendingPathComponent("file-history", isDirectory: true)
     }
+    /// `~/.kimi-code/workspaces.json`（kimi-code desktop 的工作区注册表）。
+    private var workspacesURL: URL { kimiCodeHome.appendingPathComponent("workspaces.json") }
 
     // MARK: - 扫描
 
@@ -261,6 +329,10 @@ public struct SessionCleanup: Sendable {
         let totalBytes = records.reduce(0) { $0 + $1.byteSize }
         let oldest = records.map { $0.ageDays(now: now) }.max() ?? 0
         let deletions = groups.flatMap(\.deletionItems)
+        let plannedDeletionPaths = Set(deletions.map(\.record.directory.path))
+        let workspaceScan = scanWorkspaces(
+            remaining: records.filter { !plannedDeletionPaths.contains($0.directory.path) }
+        )
 
         return CleanupPlan(
             groups: groups,
@@ -270,7 +342,10 @@ public struct SessionCleanup: Sendable {
             totalBytes: totalBytes,
             oldestAgeDays: oldest,
             deletionCount: deletions.count,
-            reclaimableBytes: deletions.reduce(0) { $0 + $1.record.byteSize }
+            reclaimableBytes: deletions.reduce(0) { $0 + $1.record.byteSize },
+            workspaceRemovals: workspaceScan.removals,
+            staleBucketIds: workspaceScan.staleBucketIds,
+            workspaceCatalogIssue: workspaceScan.issue
         )
     }
 
@@ -282,7 +357,7 @@ public struct SessionCleanup: Sendable {
         nowMs: Int64,
         policy: RetentionPolicy
     ) -> CleanupVerdict {
-        if rank < max(policy.keepCount, 1) { return .keepInKeepCount }
+        if rank < policy.keepCount { return .keepInKeepCount }
         let ageMs = nowMs - updatedAtMs
         // 最近活跃（含 updatedAt 落在未来这种时钟异常）：绝不删。
         if ageMs < Int64(RetentionPolicy.protectMinutes) * 60_000 { return .keepRecentlyActive }
@@ -291,6 +366,154 @@ public struct SessionCleanup: Sendable {
             return .keepWithinRetentionDays
         }
         return .delete
+    }
+
+    // MARK: - 工作区注册表（workspaces.json）
+
+    private struct WorkspaceCatalog {
+        var raw: [String: Any]
+        var workspaces: [String: [String: Any]]
+        var deletedIds: [String]
+    }
+
+    private struct IndexWorkDir {
+        let bucket: String
+        let workDir: String
+    }
+
+    private struct WorkspaceScanResult {
+        let removals: [WorkspaceRemoval]
+        let staleBucketIds: [String]
+        let issue: String?
+    }
+
+    /// 与 kimi-code desktop 的 `workspaceRootKey()` 对齐：反斜杠转 `/`、去尾部 `/`、
+    /// Windows 形状（盘符 / UNC）转小写；**不**展开 `~`、不解析符号链接、不做 `.`/`..` 归一化。
+    public static func workspaceRootKey(_ root: String) -> String {
+        let slashed = root.replacingOccurrences(of: "\\", with: "/")
+        let windowsShaped = slashed.range(of: #"^([A-Za-z]:/|//)"#, options: .regularExpression) != nil
+        var trimmed = slashed
+        while trimmed.count > 1 && trimmed.hasSuffix("/") { trimmed.removeLast() }
+        if trimmed == "/" { trimmed = "" }
+        return windowsShaped ? trimmed.lowercased() : trimmed
+    }
+
+    private static func bucketId(of sessionDirectory: URL) -> String {
+        sessionDirectory.deletingLastPathComponent().lastPathComponent
+    }
+
+    /// 读 `workspaces.json`；缺失 / 损坏 / 形状不对都返回 issue（调用方跳过工作区移除）。
+    private func readWorkspaceCatalog() -> (catalog: WorkspaceCatalog?, issue: String?) {
+        guard FileManager.default.fileExists(atPath: workspacesURL.path) else {
+            return (nil, "未找到 \(workspacesURL.path)")
+        }
+        guard let data = try? Data(contentsOf: workspacesURL) else {
+            return (nil, "无法读取 \(workspacesURL.path)")
+        }
+        guard let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return (nil, "\(workspacesURL.path) 不是合法的 JSON 对象")
+        }
+        guard let workspaces = raw["workspaces"] as? [String: [String: Any]] else {
+            return (nil, "\(workspacesURL.path) 缺少 workspaces 字段")
+        }
+        let deleted = (raw["deleted_workspace_ids"] as? [String]) ?? []
+        return (WorkspaceCatalog(raw: raw, workspaces: workspaces, deletedIds: deleted), nil)
+    }
+
+    /// 从 `session_index.jsonl` 取「bucket id + workDir」对；只用于补齐同 root 的 alias id。
+    private func readIndexWorkDirs() -> [IndexWorkDir] {
+        guard let raw = try? String(contentsOf: indexURL, encoding: .utf8) else { return [] }
+        var out: [IndexWorkDir] = []
+        for line in Self.splitLines(raw) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  let data = trimmed.data(using: .utf8),
+                  let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let dir = object["sessionDir"] as? String, dir.hasPrefix("/"),
+                  let workDir = object["workDir"] as? String,
+                  !workDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { continue }
+            let bucket = URL(fileURLWithPath: dir).deletingLastPathComponent().lastPathComponent
+            guard !bucket.isEmpty else { continue }
+            out.append(IndexWorkDir(bucket: bucket, workDir: workDir))
+        }
+        return out
+    }
+
+    /// 扫描空工作区：
+    /// - 按注册表 root 去重（同 root 的多个 alias 条目算一个工作区）；
+    /// - 空 = `remaining`（本次删除计划执行后仍存活的 session）里没有任何一个属于该 root；
+    /// - `deleted_workspace_ids` 里仍留有**空** bucket 的 id 单独列为待清理目录。
+    private func scanWorkspaces(remaining: [ChatSessionRecord]) -> WorkspaceScanResult {
+        let loaded = readWorkspaceCatalog()
+        guard let catalog = loaded.catalog else {
+            return WorkspaceScanResult(removals: [], staleBucketIds: [], issue: loaded.issue)
+        }
+        let indexDirs = readIndexWorkDirs()
+
+        var entriesByRoot: [String: [(id: String, root: String, name: String)]] = [:]
+        for (id, entry) in catalog.workspaces {
+            guard let root = (entry["root"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !root.isEmpty
+            else { continue }
+            let name = (entry["name"] as? String) ?? URL(fileURLWithPath: root).lastPathComponent
+            entriesByRoot[Self.workspaceRootKey(root), default: []].append((id, root, name))
+        }
+
+        var indexIdsByRoot: [String: Set<String>] = [:]
+        for entry in indexDirs {
+            indexIdsByRoot[Self.workspaceRootKey(entry.workDir), default: []].insert(entry.bucket)
+        }
+
+        var removals: [WorkspaceRemoval] = []
+        var registeredIds = Set<String>()
+        for (rootKey, entries) in entriesByRoot {
+            // 展示用 root 优先选不带尾斜杠的条目，再按 id 字典序，保证跨次扫描稳定。
+            let sorted = entries.sorted {
+                let lhsClean = !$0.root.hasSuffix("/") && !$0.root.hasSuffix("\\")
+                let rhsClean = !$1.root.hasSuffix("/") && !$1.root.hasSuffix("\\")
+                if lhsClean != rhsClean { return lhsClean }
+                return $0.id < $1.id
+            }
+            guard let canonical = sorted.first else { continue }
+            var aliasIds = Set(sorted.map(\.id))
+            aliasIds.formUnion(indexIdsByRoot[rootKey] ?? [])
+            registeredIds.formUnion(aliasIds)
+
+            let stillHasSession = remaining.contains { record in
+                aliasIds.contains(Self.bucketId(of: record.directory))
+                    || Self.workspaceRootKey(record.workspace) == rootKey
+            }
+            guard !stillHasSession else { continue }
+            removals.append(WorkspaceRemoval(
+                id: canonical.id,
+                root: canonical.root,
+                name: canonical.name,
+                aliasIds: aliasIds.sorted(),
+                rootExists: isDirectory(URL(fileURLWithPath: canonical.root))
+            ))
+        }
+        removals.sort { $0.root < $1.root }
+
+        var stale: [String] = []
+        for id in Set(catalog.deletedIds) where !registeredIds.contains(id) {
+            let bucket = sessionsRoot.appendingPathComponent(id, isDirectory: true)
+            guard isDirectory(bucket), isEmptyDirectoryIgnoringHidden(bucket) else { continue }
+            stale.append(id)
+        }
+        stale.sort()
+
+        return WorkspaceScanResult(removals: removals, staleBucketIds: stale, issue: nil)
+    }
+
+    /// 目录里除隐藏项外没有任何内容（`.DS_Store` 不算内容）。
+    private func isEmptyDirectoryIgnoringHidden(_ url: URL) -> Bool {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return false }
+        return entries.isEmpty
     }
 
     /// 枚举 `sessions/<桶>/<session>`。隐藏项（`.index-cache` / `.index-dirty` / `.DS_Store`）直接跳过。
@@ -336,12 +559,23 @@ public struct SessionCleanup: Sendable {
 
     /// 执行一个扫描计划。逐项 best-effort：一个删不掉不影响其余的。
     ///
-    /// - Parameter now: 只用于备份文件名的时间戳（本地时区 `yyyyMMddHHmmss`）。
-    public func apply(plan: CleanupPlan, now: Date) async -> CleanupOutcome {
-        applySync(plan: plan, now: now)
+    /// - Parameters:
+    ///   - now: 备份文件名的时间戳（本地时区 `yyyyMMddHHmmss`）。
+    ///   - allowWorkspaceRemoval: false 时只删 session / 修剪索引与账本，不写 `workspaces.json`、
+    ///     不删空 bucket / 空账本。调用方在 Kimi Code 桌面端运行时传 false，避免与其写盘竞争。
+    public func apply(
+        plan: CleanupPlan,
+        now: Date,
+        allowWorkspaceRemoval: Bool = true
+    ) async -> CleanupOutcome {
+        applySync(plan: plan, now: now, allowWorkspaceRemoval: allowWorkspaceRemoval)
     }
 
-    private func applySync(plan: CleanupPlan, now: Date) -> CleanupOutcome {
+    private func applySync(
+        plan: CleanupPlan,
+        now: Date,
+        allowWorkspaceRemoval: Bool
+    ) -> CleanupOutcome {
         let fm = FileManager.default
         var failures: [String] = []
         var deletedSessions = 0
@@ -378,14 +612,206 @@ public struct SessionCleanup: Sendable {
         // 4. file-history 账本修剪。
         let ledgerRemoved = pruneFileHistory(failures: &failures)
 
+        // 5. 工作区级动作：注销空工作区 + 清空 bucket / 空账本。
+        var workspaceResult = WorkspaceApplyResult()
+        var workspaceActionsSkipped = false
+        if !allowWorkspaceRemoval {
+            workspaceActionsSkipped = !plan.workspaceRemovals.isEmpty || !plan.staleBucketIds.isEmpty
+            workspaceResult.issue = plan.workspaceCatalogIssue
+        } else if !plan.workspaceRemovals.isEmpty || !plan.staleBucketIds.isEmpty {
+            workspaceResult = applyWorkspaceRemovals(plan: plan, now: now, failures: &failures)
+        } else {
+            workspaceResult.issue = plan.workspaceCatalogIssue
+        }
+
         return CleanupOutcome(
             deletedSessionCount: deletedSessions,
             deletedEventJournalCount: deletedJournals,
             reclaimedBytes: reclaimed,
             fileHistoryIdsRemoved: ledgerRemoved,
             indexRecordsRemoved: indexRemoved,
-            failures: failures
+            failures: failures,
+            removedWorkspaceCount: workspaceResult.removedWorkspaces,
+            deletedEmptyBucketCount: workspaceResult.deletedBuckets,
+            deletedEmptyLedgerCount: workspaceResult.deletedLedgers,
+            skippedWorkspaceCount: workspaceResult.skipped,
+            workspaceActionsSkipped: workspaceActionsSkipped,
+            workspaceCatalogIssue: workspaceResult.issue
         )
+    }
+
+    // MARK: - 工作区级执行
+
+    private struct WorkspaceApplyResult {
+        var removedWorkspaces = 0
+        var deletedBuckets = 0
+        var deletedLedgers = 0
+        var skipped = 0
+        var issue: String?
+    }
+
+    /// 按「预览后重新读取 + 重新校验」的纪律执行工作区移除（ADR-0009）。
+    /// 不把扫描时的整份快照覆盖回磁盘；只删此刻仍注册、且此刻仍为空的工作区。
+    private func applyWorkspaceRemovals(
+        plan: CleanupPlan,
+        now: Date,
+        failures: inout [String]
+    ) -> WorkspaceApplyResult {
+        var result = WorkspaceApplyResult()
+        let loaded = readWorkspaceCatalog()
+        guard var catalog = loaded.catalog else {
+            result.issue = loaded.issue
+            return result
+        }
+
+        let currentRecords = (try? collectSessions()) ?? []
+        let indexDirs = readIndexWorkDirs()
+
+        var registryIdsByRoot: [String: Set<String>] = [:]
+        for (id, entry) in catalog.workspaces {
+            guard let root = (entry["root"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !root.isEmpty
+            else { continue }
+            registryIdsByRoot[Self.workspaceRootKey(root), default: []].insert(id)
+        }
+        var indexIdsByRoot: [String: Set<String>] = [:]
+        for entry in indexDirs {
+            indexIdsByRoot[Self.workspaceRootKey(entry.workDir), default: []].insert(entry.bucket)
+        }
+
+        var tombstones = catalog.deletedIds
+        var tombstoneSet = Set(tombstones)
+        var bucketIds = Set<String>()
+
+        for removal in plan.workspaceRemovals {
+            let rootKey = Self.workspaceRootKey(removal.root)
+            guard let currentRegistryIds = registryIdsByRoot[rootKey], !currentRegistryIds.isEmpty else {
+                // 预览之后已经被 desktop 移除（或没有对应注册条目）：不重复计数。
+                result.skipped += 1
+                continue
+            }
+            var aliasIds = currentRegistryIds
+            aliasIds.formUnion(indexIdsByRoot[rootKey] ?? [])
+            aliasIds.formUnion(removal.aliasIds)
+
+            let stillHasSession = currentRecords.contains { record in
+                aliasIds.contains(Self.bucketId(of: record.directory))
+                    || Self.workspaceRootKey(record.workspace) == rootKey
+            }
+            guard !stillHasSession else {
+                result.skipped += 1
+                continue
+            }
+
+            for id in aliasIds {
+                bucketIds.insert(id)
+                if tombstoneSet.insert(id).inserted { tombstones.append(id) }
+            }
+            catalog.workspaces = catalog.workspaces.filter { _, entry in
+                guard let root = (entry["root"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !root.isEmpty
+                else { return true }
+                return Self.workspaceRootKey(root) != rootKey
+            }
+            result.removedWorkspaces += 1
+        }
+
+        // 已撤销注册、但磁盘上仍留有空的 bucket：只清目录，不动注册表。
+        var remainingRoots = Set<String>()
+        for (_, entry) in catalog.workspaces {
+            guard let root = (entry["root"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !root.isEmpty
+            else { continue }
+            remainingRoots.insert(Self.workspaceRootKey(root))
+        }
+        var registeredIds = Set<String>()
+        for rootKey in remainingRoots {
+            registeredIds.formUnion(registryIdsByRoot[rootKey] ?? [])
+            registeredIds.formUnion(indexIdsByRoot[rootKey] ?? [])
+        }
+        for id in Set(catalog.deletedIds).union(plan.staleBucketIds) where !registeredIds.contains(id) {
+            let bucket = sessionsRoot.appendingPathComponent(id, isDirectory: true)
+            guard isDirectory(bucket), isEmptyDirectoryIgnoringHidden(bucket) else { continue }
+            bucketIds.insert(id)
+        }
+
+        let entriesChanged = result.removedWorkspaces > 0
+        let tombstonesChanged = tombstones.count != catalog.deletedIds.count
+        if entriesChanged || tombstonesChanged {
+            guard writeWorkspaceCatalog(catalog, tombstones: tombstones, now: now, failures: &failures) else {
+                // 注册表写失败时不继续删 bucket / 账本：宁可留空目录，也不让注册表与磁盘进一步不一致。
+                return result
+            }
+        }
+
+        let fm = FileManager.default
+        for id in bucketIds.sorted() {
+            let bucket = sessionsRoot.appendingPathComponent(id, isDirectory: true)
+            guard isDirectory(bucket), isEmptyDirectoryIgnoringHidden(bucket) else { continue }
+            do {
+                try fm.removeItem(at: bucket)
+                result.deletedBuckets += 1
+            } catch {
+                failures.append("\(bucket.path)（\(error.localizedDescription)）")
+            }
+        }
+
+        for id in bucketIds.sorted() {
+            let ledger = fileHistoryDirectory.appendingPathComponent(id)
+            guard let sessions = Self.readLedgerSessions(ledger), sessions.isEmpty else { continue }
+            do {
+                try fm.removeItem(at: ledger)
+                result.deletedLedgers += 1
+            } catch {
+                failures.append("\(ledger.path)（\(error.localizedDescription)）")
+            }
+        }
+
+        return result
+    }
+
+    /// 原子写 `workspaces.json`：有改动才调用；写前备份为 `workspaces.json.bak-<yyyyMMddHHmmss>`。
+    private func writeWorkspaceCatalog(
+        _ catalog: WorkspaceCatalog,
+        tombstones: [String],
+        now: Date,
+        failures: inout [String]
+    ) -> Bool {
+        var raw = catalog.raw
+        raw["workspaces"] = catalog.workspaces
+        raw["deleted_workspace_ids"] = tombstones
+        guard let data = try? JSONSerialization.data(withJSONObject: raw, options: [.sortedKeys]) else {
+            failures.append("\(workspacesURL.path)（无法序列化）")
+            return false
+        }
+        let fm = FileManager.default
+        let backup = Self.backupURL(for: workspacesURL, now: now)
+        do {
+            try fm.copyItem(at: workspacesURL, to: backup)
+        } catch {
+            failures.append("\(workspacesURL.path)（备份失败：\(error.localizedDescription)）")
+            return false
+        }
+        let tmp = URL(fileURLWithPath: workspacesURL.path + ".tmp")
+        do {
+            try data.write(to: tmp)
+            _ = try fm.replaceItemAt(workspacesURL, withItemAt: tmp)
+        } catch {
+            try? fm.removeItem(at: tmp)
+            failures.append("\(workspacesURL.path)（写入失败：\(error.localizedDescription)）")
+            return false
+        }
+        return true
+    }
+
+    /// 同一秒内重复清理时不要让备份互相覆盖：已存在则追加 `-2`、`-3`…
+    private static func backupURL(for url: URL, now: Date) -> URL {
+        let base = url.path + ".bak-\(timestamp(now))"
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: base) else { return URL(fileURLWithPath: base) }
+        var suffix = 2
+        while fm.fileExists(atPath: "\(base)-\(suffix)") { suffix += 1 }
+        return URL(fileURLWithPath: "\(base)-\(suffix)")
     }
 
     /// 无对应 session 目录的 `server/events/session_*.jsonl`。

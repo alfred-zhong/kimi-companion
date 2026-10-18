@@ -1831,14 +1831,17 @@ public enum SelfCheck {
 
             check("Cleanup.policy.defaults", RetentionPolicy.default == RetentionPolicy(keepCount: 3, retentionDays: 7))
             check("Cleanup.policy.protectMinutes", RetentionPolicy.protectMinutes == 30)
-            check("Cleanup.policy.keepCountFloored", RetentionPolicy(keepCount: 0).keepCount == 1)
-            check("Cleanup.policy.keepCountNegative", RetentionPolicy(keepCount: -5).keepCount == 1)
+            check("Cleanup.policy.keepCountZeroAllowed", RetentionPolicy(keepCount: 0).keepCount == 0)
+            check("Cleanup.policy.keepCountNegative", RetentionPolicy(keepCount: -5).keepCount == 0)
             check("Cleanup.policy.daysNegative", RetentionPolicy(retentionDays: -1).retentionDays == 0)
-            // 即使绕过 init 的夹取把 keepCount 改成 0，每工作区仍保留最新 1 个。
-            var zeroKeep = RetentionPolicy()
-            zeroKeep.keepCount = 0
-            check("Cleanup.policy.zeroKeepKeepsNewest",
-                  SessionCleanup.verdict(rank: 0, updatedAtMs: nowMs - days(100), nowMs: nowMs, policy: zeroKeep) == .keepInKeepCount)
+            // keepCount = 0：名额门槛消失，但 30 分钟保护与保留天数仍然生效。
+            let zeroKeep = RetentionPolicy(keepCount: 0, retentionDays: 7)
+            check("Cleanup.policy.zeroKeepDeletesOldest",
+                  SessionCleanup.verdict(rank: 0, updatedAtMs: nowMs - days(100), nowMs: nowMs, policy: zeroKeep) == .delete)
+            check("Cleanup.policy.zeroKeepStillProtectsRecent",
+                  SessionCleanup.verdict(rank: 0, updatedAtMs: nowMs - 60_000, nowMs: nowMs, policy: zeroKeep) == .keepRecentlyActive)
+            check("Cleanup.policy.zeroKeepStillHonorsDays",
+                  SessionCleanup.verdict(rank: 0, updatedAtMs: nowMs - days(3), nowMs: nowMs, policy: zeroKeep) == .keepWithinRetentionDays)
             // retentionDays = 0 → 不限天数：老 session 照删。
             let unlimited = RetentionPolicy(keepCount: 1, retentionDays: 0)
             check("Cleanup.policy.unlimitedDeletesOld",
@@ -1943,6 +1946,8 @@ public enum SelfCheck {
             check("Cleanup.preview.policyLabel", CleanupPresenter.policyLabel(policy) == "每工作区保留 3 个 / 早于 7 天")
             check("Cleanup.preview.policyLabel.unlimited",
                   CleanupPresenter.policyLabel(RetentionPolicy(keepCount: 1, retentionDays: 0)) == "每工作区保留 1 个 / 不限天数")
+            check("Cleanup.preview.policyLabel.zero",
+                  CleanupPresenter.policyLabel(RetentionPolicy(keepCount: 0, retentionDays: 7)) == "每工作区不保留 / 早于 7 天")
 
             // 空 home（一个 session 都没有）也要说清「没找到任何 session」。
             let emptyHome = CleanupPlan(
@@ -1954,19 +1959,88 @@ public enum SelfCheck {
             )
             check("Cleanup.preview.emptyHome", emptyContent.info.hasSuffix("未找到任何 session。"))
 
+            // 只有空工作区、没有 session 可删：仍然是可确认弹窗，并单独列出工作区。
+            let workspaceOnly = CleanupPlan(
+                groups: [],
+                orphanEventJournals: [],
+                fileHistoryZombieIds: [],
+                totalSessionCount: 0,
+                totalBytes: 0,
+                oldestAgeDays: 0,
+                deletionCount: 0,
+                reclaimableBytes: 0,
+                workspaceRemovals: [
+                    WorkspaceRemoval(id: "wd_empty_1", root: "/Users/alfred/empty", name: "empty",
+                                     aliasIds: ["wd_empty_1"], rootExists: true),
+                    WorkspaceRemoval(id: "wd_gone_2", root: "/Users/alfred/gone", name: "gone",
+                                     aliasIds: ["wd_gone_2"], rootExists: false),
+                ],
+                staleBucketIds: ["wd_stale_3"]
+            )
+            let workspacePreview = CleanupPresenter.previewContent(
+                plan: workspaceOnly, policy: policy, now: now, desktopRunning: false
+            )
+            check("Cleanup.preview.workspaceOnlyConfirmable", workspacePreview.confirmable)
+            check("Cleanup.preview.workspaceOnlySummary",
+                  workspacePreview.info.contains("没有可删除的 session")
+                      && workspacePreview.info.contains("将移除 2 个空工作区")
+                      && workspacePreview.info.contains("将清理 1 个已移除工作区的空目录"))
+            check("Cleanup.preview.workspaceListing",
+                  workspacePreview.detail?.contains("── 空工作区（2 个）") == true
+                      && workspacePreview.detail?.contains("[将移除] /Users/alfred/empty") == true
+                      && workspacePreview.detail?.contains("/Users/alfred/gone（目录已不存在）") == true
+                      && workspacePreview.detail?.contains("[将清理] wd_stale_3") == true)
+            let workspaceSkipped = CleanupPresenter.previewContent(
+                plan: workspaceOnly, policy: policy, now: now, desktopRunning: true
+            )
+            check("Cleanup.preview.workspaceSkippedSummary",
+                  workspaceSkipped.info.contains("本次跳过")
+                      && workspaceSkipped.info.contains("有 2 个空工作区可移除"))
+            check("Cleanup.preview.workspaceSkippedListing",
+                  workspaceSkipped.detail?.contains("[本次跳过] /Users/alfred/empty") == true)
+            let issuePlan = CleanupPlan(
+                groups: [], orphanEventJournals: [], fileHistoryZombieIds: [],
+                totalSessionCount: 0, totalBytes: 0, oldestAgeDays: 0,
+                deletionCount: 0, reclaimableBytes: 0,
+                workspaceCatalogIssue: "workspaces.json 无法解析"
+            )
+            check("Cleanup.preview.catalogIssue",
+                  CleanupPresenter.previewContent(plan: issuePlan, policy: policy, now: now, desktopRunning: false)
+                      .info.contains("工作区注册表读取失败"))
+
             // 完成文案：一行结果 + 一行产物计数（0 也照写）；有失败时列出前 3 条路径。
             let clean = CleanupOutcome(
                 deletedSessionCount: 3, deletedEventJournalCount: 2, reclaimedBytes: 21_700_000,
-                fileHistoryIdsRemoved: 1, indexRecordsRemoved: 0, failures: []
+                fileHistoryIdsRemoved: 1, indexRecordsRemoved: 0, failures: [],
+                removedWorkspaceCount: 2, deletedEmptyBucketCount: 3,
+                deletedEmptyLedgerCount: 1, skippedWorkspaceCount: 1
             )
             let done = CleanupPresenter.completionContent(clean)
             check("Cleanup.completion.title", done.title == "清理完成")
-            check("Cleanup.completion.summary", done.info.hasPrefix("已删除 3 个 session，释放 20.7 MB；0 个删除失败"))
+            check("Cleanup.completion.summary",
+                  done.info.hasPrefix("已删除 3 个 session，释放 20.7 MB；移除 2 个空工作区；0 个操作失败"))
             check("Cleanup.completion.counters",
                   done.info.contains("session_index.jsonl 移除 0 条记录")
                       && done.info.contains("file-history 清理 1 条条目")
-                      && done.info.contains("孤儿事件文件 2 个"))
+                      && done.info.contains("孤儿事件文件 2 个")
+                      && done.info.contains("空 bucket 3 个")
+                      && done.info.contains("空账本 1 个"))
+            check("Cleanup.completion.skippedWorkspace",
+                  done.info.contains("1 个工作区因仍有 session 未移除"))
+            check("Cleanup.completion.restartHint",
+                  done.info.contains("重启 Kimi Code 后才会刷新"))
             check("Cleanup.completion.singleButton", done.confirmable == false && done.detail == nil)
+
+            let workspaceSkippedOutcome = CleanupOutcome(
+                deletedSessionCount: 1, deletedEventJournalCount: 0, reclaimedBytes: 1024,
+                fileHistoryIdsRemoved: 0, indexRecordsRemoved: 0, failures: [],
+                workspaceActionsSkipped: true, workspaceCatalogIssue: "workspaces.json 无法解析"
+            )
+            let workspaceSkippedContent = CleanupPresenter.completionContent(workspaceSkippedOutcome)
+            check("Cleanup.completion.workspaceSkip",
+                  workspaceSkippedContent.info.contains("本次不会移除空工作区"))
+            check("Cleanup.completion.workspaceIssue",
+                  workspaceSkippedContent.info.contains("工作区注册表未改动：workspaces.json 无法解析"))
 
             let failed = CleanupOutcome(
                 deletedSessionCount: 1, deletedEventJournalCount: 0, reclaimedBytes: 1024,
@@ -1974,7 +2048,7 @@ public enum SelfCheck {
                 failures: ["/a（Permission denied）", "/b（x）", "/c（y）", "/d（z）"]
             )
             let failedContent = CleanupPresenter.completionContent(failed)
-            check("Cleanup.completion.failureCount", failedContent.info.contains("4 个删除失败"))
+            check("Cleanup.completion.failureCount", failedContent.info.contains("4 个操作失败"))
             check("Cleanup.completion.failurePathsFirstThree",
                   failedContent.detail == "失败：/a（Permission denied）\n失败：/b（x）\n失败：/c（y）")
 
@@ -2140,10 +2214,10 @@ public enum SelfCheck {
                 write(root, "server/events/session_zzzz9999.jsonl", "{}\n")
                 write(root, "server/events/notes.txt", "keep me\n")
 
-                // D7：这些一律不许碰。
+                // D7：这些一律不许改；workspaces.json 在没有空工作区时只读不写。
                 let untouched = [
                     "server/instances/01M38.json", "server.token", "mcp.json", "search-index/seg",
-                    "workspaces.json", "config.toml",
+                    "workspaces.json", "config.toml", "workspace-trust/wd_x",
                     "sessions/.index-cache/foo", "sessions/.index-dirty/foo",
                 ]
                 for rel in untouched { write(root, rel, "do not touch\n") }
@@ -2244,6 +2318,168 @@ public enum SelfCheck {
                     // D7 清单：全部原封不动。
                     let untouchedSurvivors = untouched.filter { exists(root, $0) }
                     check("Cleanup.e2e.forbiddenUntouched", untouchedSurvivors.count == untouched.count)
+                }
+            }
+
+            // 空工作区：keepCount 0 + workspaces.json 注销 + 空 bucket / 空账本清理。
+            do {
+                let keepBucket = "wd_keep_111111111111"
+                let emptyBucket = "wd_empty_222222222222"
+                let aliasBucket = "wd_empty_alias_333333333333"
+                let goneBucket = "wd_gone_444444444444"
+                let tombBucket = "wd_tomb_555555555555"
+                let indexOnlyBucket = "wd_idxonly_666666666666"
+                let root = makeRoot("workspaces")
+                let emptyRoot = root.appendingPathComponent("workspace-empty", isDirectory: true)
+                let goneRoot = root.appendingPathComponent("workspace-gone", isDirectory: true)
+                try? fm.createDirectory(at: emptyRoot, withIntermediateDirectories: true)
+
+                // keep：最近活跃，30 分钟保护下不会被删。
+                write(root, "sessions/\(keepBucket)/session_keep0001/state.json",
+                      state(cwd: "/w/keep", updatedAt: nowMs - 60_000))
+                // empty：10 天前；keepCount 0 + retentionDays 7 → 删掉后工作区为空。
+                write(root, "sessions/\(emptyBucket)/session_old00001/state.json",
+                      state(cwd: emptyRoot.path + "/", updatedAt: nowMs - 10 * dayMs))
+                // gone：root 不存在，也没有 bucket。
+                // tomb：已注销，但磁盘上留下一个只有隐藏文件的空 bucket。
+                write(root, "sessions/\(tombBucket)/.DS_Store", "x")
+
+                let catalog = """
+                {
+                  "version": 1,
+                  "workspaces": {
+                    "\(keepBucket)": {"root": "/w/keep", "name": "keep", "created_at": "a", "last_opened_at": "b"},
+                    "\(emptyBucket)": {"root": "\(emptyRoot.path)", "name": "empty", "created_at": "a", "last_opened_at": "b"},
+                    "\(aliasBucket)": {"root": "\(emptyRoot.path)/", "name": "empty-alias", "created_at": "a", "last_opened_at": "b"},
+                    "\(goneBucket)": {"root": "\(goneRoot.path)", "name": "gone", "created_at": "a", "last_opened_at": "b"}
+                  },
+                  "deleted_workspace_ids": ["\(tombBucket)"],
+                  "extra_field": 42
+                }
+                """
+                write(root, "workspaces.json", catalog)
+
+                // index 里给 emptyRoot 一个额外的 alias bucket（目录不存在）：注销时应一起写墓碑。
+                let aliasIndex = "{\"sessionId\":\"session_x\",\"sessionDir\":\"\(root.path)/sessions/\(indexOnlyBucket)/session_x\",\"workDir\":\"\(emptyRoot.path)\"}"
+                write(root, "session_index.jsonl", aliasIndex + "\n")
+
+                write(root, "file-history/\(emptyBucket)", "{\"sessions\":[{\"id\":\"session_old00001\"}]}")
+                write(root, "file-history/\(tombBucket)", "{\"sessions\":[]}")
+                write(root, "file-history/\(keepBucket)", "{\"sessions\":[{\"id\":\"session_keep0001\"}]}")
+
+                let cleanup = SessionCleanup(kimiCodeHome: root)
+                let policy = RetentionPolicy(keepCount: 0, retentionDays: 7)
+                let plan = syncResult { try await cleanup.scan(now: now, policy: policy) }.value
+                check("Cleanup.ws.scanSucceeded", plan != nil)
+                if let plan {
+                    check("Cleanup.ws.catalogRead", plan.workspaceCatalogIssue == nil)
+                    check("Cleanup.ws.removalCount", plan.workspaceRemovalCount == 2)
+                    check("Cleanup.ws.removalRoots",
+                          plan.workspaceRemovals.map(\.root).sorted() == [emptyRoot.path, goneRoot.path])
+                    let emptyRemoval = plan.workspaceRemovals.first { $0.root == emptyRoot.path }
+                    check("Cleanup.ws.aliasIds",
+                          emptyRemoval?.aliasIds.contains(emptyBucket) == true
+                              && emptyRemoval?.aliasIds.contains(aliasBucket) == true
+                              && emptyRemoval?.aliasIds.contains(indexOnlyBucket) == true)
+                    check("Cleanup.ws.rootExists",
+                          emptyRemoval?.rootExists == true
+                              && plan.workspaceRemovals.first { $0.root == goneRoot.path }?.rootExists == false)
+                    check("Cleanup.ws.keepNotRemoved",
+                          !plan.workspaceRemovals.contains { $0.root == "/w/keep" })
+                    check("Cleanup.ws.staleBucket", plan.staleBucketIds == [tombBucket])
+                    check("Cleanup.ws.zeroKeepDeletes",
+                          plan.deletionItems.map(\.record.id) == ["session_old00001"])
+
+                    // 桌面端运行中：session 照删，工作区级动作全部跳过。
+                    let skipped = sync {
+                        await cleanup.apply(plan: plan, now: now, allowWorkspaceRemoval: false)
+                    }
+                    check("Cleanup.ws.skipSessionsDeleted", skipped.deletedSessionCount == 1)
+                    check("Cleanup.ws.skipFlag", skipped.workspaceActionsSkipped)
+                    check("Cleanup.ws.skipNoRemoval", skipped.removedWorkspaceCount == 0)
+                    check("Cleanup.ws.skipCatalogUntouched", readText(root, "workspaces.json") == catalog)
+                    check("Cleanup.ws.skipBucketKept", exists(root, "sessions/\(emptyBucket)"))
+
+                    // 第二次允许工作区动作：按当前磁盘状态重新读取、重新校验后执行。
+                    let outcome = sync { await cleanup.apply(plan: plan, now: now) }
+                    check("Cleanup.ws.applyFailures", outcome.failures.isEmpty)
+                    check("Cleanup.ws.applyRemoved", outcome.removedWorkspaceCount == 2)
+                    check("Cleanup.ws.applyBuckets", outcome.deletedEmptyBucketCount == 2)
+                    check("Cleanup.ws.applyLedgers", outcome.deletedEmptyLedgerCount == 2)
+                    check("Cleanup.ws.applyNoSkip", outcome.skippedWorkspaceCount == 0)
+                    check("Cleanup.ws.applyIssueNil", outcome.workspaceCatalogIssue == nil)
+
+                    let data = try? Data(contentsOf: root.appendingPathComponent("workspaces.json"))
+                    let json = data.flatMap {
+                        (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
+                    }
+                    let workspaces = json?["workspaces"] as? [String: Any]
+                    let tombstones = json?["deleted_workspace_ids"] as? [String]
+                    check("Cleanup.ws.registryKept", Set((workspaces ?? [:]).keys) == [keepBucket])
+                    check("Cleanup.ws.registryTombstones",
+                          Set(tombstones ?? []) == [emptyBucket, aliasBucket, goneBucket, tombBucket, indexOnlyBucket])
+                    check("Cleanup.ws.registryPreserved",
+                          (json?["version"] as? Int) == 1 && (json?["extra_field"] as? Int) == 42)
+                    check("Cleanup.ws.backup",
+                          ((try? fm.contentsOfDirectory(atPath: root.path)) ?? [])
+                              .contains { $0.hasPrefix("workspaces.json.bak-") })
+                    check("Cleanup.ws.emptyBucketGone", !exists(root, "sessions/\(emptyBucket)"))
+                    check("Cleanup.ws.tombBucketGone", !exists(root, "sessions/\(tombBucket)"))
+                    check("Cleanup.ws.keepBucketKept", exists(root, "sessions/\(keepBucket)/session_keep0001"))
+                    check("Cleanup.ws.emptyLedgerGone", !exists(root, "file-history/\(emptyBucket)"))
+                    check("Cleanup.ws.tombLedgerGone", !exists(root, "file-history/\(tombBucket)"))
+                    check("Cleanup.ws.keepLedgerKept", exists(root, "file-history/\(keepBucket)"))
+                    check("Cleanup.ws.tmpRemoved", !exists(root, "workspaces.json.tmp"))
+                }
+            }
+
+            // 预览之后工作区又出现 session：apply 复审必须跳过，不注销。
+            do {
+                let bucket = "wd_again_111111111111"
+                let root = makeRoot("wsrevalidate")
+                let original = "{\"version\":1,\"workspaces\":{\"\(bucket)\":{\"root\":\"/w/again\",\"name\":\"again\",\"created_at\":\"a\",\"last_opened_at\":\"b\"}},\"deleted_workspace_ids\":[]}"
+                write(root, "workspaces.json", original)
+                try? fm.createDirectory(at: root.appendingPathComponent("sessions"), withIntermediateDirectories: true)
+
+                let cleanup = SessionCleanup(kimiCodeHome: root)
+                let plan = syncResult {
+                    try await cleanup.scan(now: now, policy: RetentionPolicy(keepCount: 0, retentionDays: 0))
+                }.value
+                check("Cleanup.ws.revalidate.planned", plan?.workspaceRemovalCount == 1)
+
+                // 扫描之后、确认之前，桌面端新建了一个 session。
+                write(root, "sessions/\(bucket)/session_new0001/state.json",
+                      state(cwd: "/w/again", updatedAt: nowMs))
+
+                if let plan {
+                    let outcome = sync { await cleanup.apply(plan: plan, now: now) }
+                    check("Cleanup.ws.revalidate.skipped", outcome.skippedWorkspaceCount == 1)
+                    check("Cleanup.ws.revalidate.notRemoved", outcome.removedWorkspaceCount == 0)
+                    check("Cleanup.ws.revalidate.catalogUntouched",
+                          readText(root, "workspaces.json") == original)
+                    check("Cleanup.ws.revalidate.bucketKept", exists(root, "sessions/\(bucket)"))
+                }
+            }
+
+            // workspaces.json 损坏：扫描只报 issue，apply 不覆盖文件。
+            do {
+                let root = makeRoot("wsbad")
+                write(root, "workspaces.json", "{not json")
+                try? fm.createDirectory(at: root.appendingPathComponent("sessions"), withIntermediateDirectories: true)
+
+                let cleanup = SessionCleanup(kimiCodeHome: root)
+                let plan = syncResult {
+                    try await cleanup.scan(now: now, policy: RetentionPolicy())
+                }.value
+                check("Cleanup.ws.badCatalog.issue", plan?.workspaceCatalogIssue != nil)
+                check("Cleanup.ws.badCatalog.noRemoval", plan?.workspaceRemovalCount == 0)
+                if let plan {
+                    let outcome = sync { await cleanup.apply(plan: plan, now: now) }
+                    check("Cleanup.ws.badCatalog.outcomeIssue", outcome.workspaceCatalogIssue != nil)
+                    check("Cleanup.ws.badCatalog.untouched", readText(root, "workspaces.json") == "{not json")
+                    check("Cleanup.ws.badCatalog.noBackup",
+                          !((try? fm.contentsOfDirectory(atPath: root.path)) ?? [])
+                              .contains { $0.hasPrefix("workspaces.json.bak-") })
                 }
             }
 
@@ -2357,16 +2593,21 @@ public enum SelfCheck {
             let restored = SettingsStore(defaults: defaults)
             check("Settings.cleanup.restores", restored.cleanupKeepCount == 5 && restored.cleanupRetentionDays == 0)
 
+            // 0 也是 Keep Count 的合法值，必须与「从未设置」区分开（不能回退到默认 3）。
+            defaults.set(0, forKey: SettingsStore.cleanupKeepCountKey)
+            let zeroKeep = SettingsStore(defaults: defaults)
+            check("Settings.cleanup.persistsZeroKeep", zeroKeep.cleanupKeepCount == 0)
+
             defaults.set(999, forKey: SettingsStore.cleanupKeepCountKey)
             defaults.set(-3, forKey: SettingsStore.cleanupRetentionDaysKey)
             let clamped = SettingsStore(defaults: defaults)
             check("Settings.cleanup.clampsHigh", clamped.cleanupKeepCount == 20)
             check("Settings.cleanup.clampsLow", clamped.cleanupRetentionDays == 0)
             check("Settings.cleanup.clampHelpers",
-                  SettingsStore.clampKeepCount(0) == 1 && SettingsStore.clampKeepCount(999) == 20
+                  SettingsStore.clampKeepCount(-5) == 0 && SettingsStore.clampKeepCount(999) == 20
                       && SettingsStore.clampRetentionDays(-1) == 0 && SettingsStore.clampRetentionDays(999) == 365)
             check("Settings.cleanup.ranges",
-                  SettingsStore.cleanupKeepCountRange == 1...20 && SettingsStore.cleanupRetentionDaysRange == 0...365)
+                  SettingsStore.cleanupKeepCountRange == 0...20 && SettingsStore.cleanupRetentionDaysRange == 0...365)
         }
 
         // MARK: - LogoCatalog / 落地资源

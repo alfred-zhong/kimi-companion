@@ -23,20 +23,30 @@ Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock �
 
 ## 清理 session 文件
 
-菜单里的 `清理 session 文件…` 是 app **唯一的破坏性操作**，机制是直接删文件系统（不走 kimi-code 的本地 HTTP 接口，也不 shell-out 任何外部进程）。点击后的流程是：后台扫描 → 弹出预览（相当于脚本的 dry-run，只列**将被删除**的会话，按工作区分组）→ 点「确定」才真删、点「取消」什么都不做 → 再弹结果，并触发一次完整刷新。
+菜单里的 `清理 session 文件…` 是 app **唯一的破坏性操作**，机制是直接删文件系统 + 受控写 `~/.kimi-code/workspaces.json`（不走 kimi-code 的本地 HTTP 接口，也不 shell-out 任何外部进程）。点击后的流程是：后台扫描 → 弹出预览（相当于脚本的 dry-run，分别列出**将被删除**的会话与**将被注销**的空工作区）→ 点「确定」才真删 / 真注销、点「取消」什么都不做 → 再弹结果，并触发一次完整刷新。
 
 保留策略是**合取**（三条全部成立才删），参数在偏好面板里：
 
 | 参数 | 默认 | 范围 | 含义 |
 |---|---|---|---|
-| 工作区保留数 | 3 | 1…20 | 每个工作区保留最近 N 个会话；**每工作区永远保留最新 1 个** |
+| 工作区保留数 | 3 | 0…20 | 每个工作区保留最近 N 个会话；`0` = 不保留名额（30 分钟保护与保留天数仍生效） |
 | 保留天数 | 7 | 0…365（`0` = 不限） | 只删除最后更新早于 N 天的会话 |
 
 另有写死的 30 分钟活跃保护（最近 30 分钟内更新过的一律不删）——它是磁盘上唯一能近似「这个会话正在被写」的信号，因此不进偏好设置。
 
-一次清理会一并处理会话的四处产物：会话目录、`server/events/session_*.jsonl` 里不对应任何现存会话的孤儿事件流、`session_index.jsonl` 里指向已消失目录的行、`file-history/<桶>` 里目录已不存在的账本条目。逐项 best-effort（一个删不掉不影响其余的，失败路径在结果弹窗里上报）。`__global__.jsonl` 永不删；`server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspaces.json`、`config.toml` 一律不碰。`session_index.jsonl` 有改动时才写，写前备份为 `session_index.jsonl.bak-<yyyyMMddHHmmss>`。
+一次清理会一并处理：
 
-**删除不可撤销**（不进废纸篓、没有 undo）。决策与取舍见 `docs/adr/0007-session-cleanup-in-app.md`。
+1. 会话目录；
+2. `server/events/session_*.jsonl` 里不对应任何现存会话的孤儿事件流；
+3. `session_index.jsonl` 里指向已消失目录的行；
+4. `file-history/<桶>` 里目录已不存在的账本条目；
+5. **空工作区**：一个注册工作区在本次删除后所有 alias bucket 都没有会话目录时，从 `workspaces.json` 注销（同 root 的全部 alias 条目一起移除，id 写进 `deleted_workspace_ids`），并回收它的空 bucket 与空 `file-history` 账本。root 目录本身不删；重新打开该文件夹可恢复注册。
+
+逐项 best-effort（一个删不掉不影响其余的，失败路径在结果弹窗里上报）。`__global__.jsonl` 永不删；`server/instances/`、`server.token`、`mcp.json`、`search-index/`、`sessions/.index-cache/`、`sessions/.index-dirty/`、`workspace-trust/`、`config.toml` 一律不碰。`workspaces.json` 只在第 5 步受控读写：有改动才写，写前备份为 `workspaces.json.bak-<yyyyMMddHHmmss>`，原子替换，且 apply 前重新读取、只注销「此刻仍为空」的工作区；文件缺失 / 损坏时跳过工作区移除，绝不重建。`session_index.jsonl` 同理，写前备份为 `session_index.jsonl.bak-<yyyyMMddHHmmss>`。
+
+**Kimi Code 桌面端运行时只会删会话，不会注销工作区**（避免与它的整文件重写竞争）：预览与结果都会说明「退出后再次清理」。desktop 的工作区列表不会立即刷新，通常需要重启 Kimi Code 才能看到空工作区消失。
+
+**删除与注销不可撤销**（不进废纸篓、没有 undo）。决策与取舍见 `docs/adr/0007-session-cleanup-in-app.md` 与 `docs/adr/0009-empty-workspace-cleanup.md`。
 
 ## 支持的 Provider
 
@@ -137,7 +147,8 @@ swift run kimi-companion --self-check
 - **仅本机 ad-hoc 签名**（`codesign --force --deep --sign -`），未做 Developer ID 公证，不适合分发。
 - **构建环境是 Command Line Tools only**：`xcodebuild` 不可用；SwiftUI 视图状态用 `ObservableObject` + `@ObservedObject`（`@State` 等宏展开的 property wrapper 在缺少 `libSwiftUIMacros.dylib` 的 CLT 环境下编不过）。
 - **日志时间戳依赖时钟**：系统时钟被回拨时，增量读取会丢弃全部游标状态并退化为一次全量重扫。
-- **清理不阻止 kimi-code 运行**：磁盘上没有可靠信号能判断一个会话是否正被打开着（`state.json` 没有 busy 字段、会话目录里没有锁文件），只能靠 30 分钟活跃保护缩小概率。检测到 Kimi Code 桌面端在运行会在预览里给一行警告，但不禁用「确定」；终端里的 CLI 检测不到。
+- **清理不阻止 kimi-code 运行**：磁盘上没有可靠信号能判断一个会话是否正被打开着（`state.json` 没有 busy 字段、会话目录里没有锁文件），只能靠 30 分钟活跃保护缩小概率。检测到 Kimi Code 桌面端在运行时，预览里会给一行警告但不禁用「确定」；同时**跳过工作区注销**（不写 `workspaces.json`、不删空 bucket / 空账本），退出 desktop 后再次清理即可。终端里的 CLI 检测不到。
+- **空工作区消失不会立即反映到 desktop UI**：renderer 只在启动加载与 session resync 时重新拉工作区列表，通常需要重启 Kimi Code 才能看到。
 
 ## 架构
 
@@ -151,3 +162,4 @@ swift run kimi-companion --self-check
 - `0006-combined-usage.md` — 为什么用量是合并的一份、不再按 Provider / model 区分
 - `0007-session-cleanup-in-app.md` — 为什么在 app 内直接删文件系统做清理，以及保留策略为何是合取
 - `0008-kimi-balance-scope-and-currency.md` — `Kimi` 余额的范围与币种：为什么端点写死国内站、币种恒为 CNY，以及为什么凭据取自内置工具服务段而非 `[providers.*]`
+- `0009-empty-workspace-cleanup.md` — 为什么允许 Keep Count = 0，以及为什么 `workspaces.json` 从绝不触碰变成受控写入（空工作区注销）

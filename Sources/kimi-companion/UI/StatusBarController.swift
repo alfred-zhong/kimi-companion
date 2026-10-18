@@ -317,15 +317,21 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
             return
         }
 
+        let desktopRunning = Self.isDesktopRunning()
         let preview = CleanupPresenter.previewContent(
             plan: plan,
             policy: policy,
             now: now,
-            desktopRunning: Self.isDesktopRunning()
+            desktopRunning: desktopRunning
         )
         guard CleanupAlertPresenter.present(preview) else { return }
 
-        let outcome = await cleanup.apply(plan: plan, now: Date())
+        // 预览到执行之间 desktop 可能被启动：执行前再判一次，工作区级写入一旦有竞争就跳过。
+        let outcome = await cleanup.apply(
+            plan: plan,
+            now: Date(),
+            allowWorkspaceRemoval: !Self.isDesktopRunning()
+        )
         CleanupAlertPresenter.present(CleanupPresenter.completionContent(outcome))
         // 删掉的 session 会影响用量（也影响正在跑的会话），因此按「立即刷新」同路径完整刷新一次。
         await controller.tick()

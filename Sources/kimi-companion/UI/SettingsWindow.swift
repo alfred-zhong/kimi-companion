@@ -8,9 +8,9 @@ public final class SettingsStore: ObservableObject, @unchecked Sendable {
     static let cleanupKeepCountKey = "cleanupKeepCount"
     static let cleanupRetentionDaysKey = "cleanupRetentionDays"
 
-    /// 工作区保留数的默认值与合法范围。
+    /// 工作区保留数的默认值与合法范围；`0` 表示这个工作区不保留任何 session。
     public static let defaultCleanupKeepCount = 3
-    public static let cleanupKeepCountRange = 1...20
+    public static let cleanupKeepCountRange = 0...20
     /// 保留天数的默认值与合法范围；`0` 表示「不限天数」。
     public static let defaultCleanupRetentionDays = 7
     public static let cleanupRetentionDaysRange = 0...365
@@ -58,7 +58,7 @@ public final class SettingsStore: ObservableObject, @unchecked Sendable {
         self.cleanupRetentionDays = Self.clampRetentionDays(days ?? Self.defaultCleanupRetentionDays)
     }
 
-    /// 越界值夹回 `cleanupKeepCountRange`（下限 1：每工作区永远保留最新 1 个）。
+    /// 越界值夹回 `cleanupKeepCountRange`（下限 0 = 不保留名额；30 分钟保护与保留天数仍生效）。
     public static func clampKeepCount(_ value: Int) -> Int {
         min(max(value, cleanupKeepCountRange.lowerBound), cleanupKeepCountRange.upperBound)
     }
@@ -98,7 +98,7 @@ public final class SettingsWindowController: NSObject, NSWindowDelegate {
         )
         let host = NSHostingController(rootView: view)
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 170),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 210),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -148,7 +148,7 @@ private struct SettingsView: View {
                     value: $store.cleanupKeepCount,
                     in: SettingsStore.cleanupKeepCountRange
                 ) {
-                    Text("\(store.cleanupKeepCount) 个")
+                    Text(store.cleanupKeepCount == 0 ? "不保留" : "\(store.cleanupKeepCount) 个")
                         .monospacedDigit()
                         .frame(width: 56, alignment: .leading)
                 }
@@ -164,12 +164,12 @@ private struct SettingsView: View {
                         .frame(width: 56, alignment: .leading)
                 }
             }
-            Text("清理 session 文件时，每个工作区保留最近 N 个；更老的 session 只在其最后更新早于 N 天时删除。保留天数填 0 表示不限天数。")
+            Text("清理 session 文件时，每个工作区保留最近 N 个；填 0 表示不保留名额（30 分钟活跃保护与保留天数仍然生效）。只有最后更新早于保留天数的 session 才会被删；保留天数填 0 表示不限天数。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(20)
-        .frame(width: 420, height: 170, alignment: .topLeading)
+        .frame(width: 420, height: 210, alignment: .topLeading)
     }
 }
