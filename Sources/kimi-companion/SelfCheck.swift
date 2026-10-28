@@ -302,6 +302,16 @@ public enum SelfCheck {
             check("OpenCode.url.neverTrailingSlash", !OpenCodeGoProvider.usageURL(baseURL: "https://opencode.ai/zen/go/v1/").absoluteString.hasSuffix("/"))
             check("OpenCode.url.default", OpenCodeGoProvider.usageURL(baseURL: nil).absoluteString == "https://opencode.ai/zen/go/v1/usage")
             check("OpenCode.url.rejectsHTTP", OpenCodeGoProvider.usageURL(baseURL: "http://opencode.ai/zen/go/v1").absoluteString == "https://opencode.ai/zen/go/v1/usage")
+            // kimi-code 的 base_url 是 OpenAI 兼容地址（末尾 `…/openai/v1`）：直接拼 /usage 会 404，
+            // 必须摘掉 `openai` 段（实测 `…/inference/go/v1/usage` 才是 200）。
+            check("OpenCode.url.openaiCompatBase", OpenCodeGoProvider.usageURL(baseURL: "https://opencode.ai/inference/go/openai/v1").absoluteString
+                == "https://opencode.ai/inference/go/v1/usage")
+            check("OpenCode.url.openaiCompatBaseTrailingSlash", OpenCodeGoProvider.usageURL(baseURL: "https://opencode.ai/inference/go/openai/v1/").absoluteString
+                == "https://opencode.ai/inference/go/v1/usage")
+            check("OpenCode.url.openaiSegmentCaseInsensitive", OpenCodeGoProvider.usageURL(baseURL: "https://opencode.ai/inference/go/OpenAI/v1").absoluteString
+                == "https://opencode.ai/inference/go/v1/usage")
+            check("OpenCode.url.zenBaseUntouched", OpenCodeGoProvider.usageBaseURL("https://opencode.ai/zen/go/v1") == "https://opencode.ai/zen/go/v1")
+            check("OpenCode.url.noOpenaiSegmentNoChange", OpenCodeGoProvider.usageBaseURL("https://opencode.ai") == "https://opencode.ai")
             check("OpenCode.baseURLUsed", p.id == .opencodeGo)
         }
 
@@ -475,6 +485,13 @@ public enum SelfCheck {
             _ = syncResult { try await oc.fetch(creds: MapCredentialSource(values: ["OpenCode Go": "oc_test"]), http: ocHTTP) }
             check("Fetch.opencode.urlNoTrailingSlash", ocHTTP.requestedURLs == ["https://opencode.ai/zen/go/v1/usage"])
             check("Fetch.opencode.auth", ocHTTP.requestedHeaders["Authorization"] == "Bearer oc_test")
+
+            // 线上 kimi-code 配的 OpenAI 兼容 base_url：请求必须落到 `/inference/go/v1/usage`。
+            let ocCompatHTTP = RecordingHTTP()
+            ocCompatHTTP.body = ocHTTP.body
+            let ocCompat = OpenCodeGoProvider(baseURL: "https://opencode.ai/inference/go/openai/v1")
+            _ = syncResult { try await ocCompat.fetch(creds: MapCredentialSource(values: ["OpenCode Go": "oc_test"]), http: ocCompatHTTP) }
+            check("Fetch.opencode.openaiCompatURL", ocCompatHTTP.requestedURLs == ["https://opencode.ai/inference/go/v1/usage"])
 
             // Kimi：端点写死国内站（不看 base_url），凭据走 `services.<段名>` 路径。
             let kimiHTTP = RecordingHTTP()

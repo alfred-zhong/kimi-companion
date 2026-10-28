@@ -151,7 +151,7 @@ make clean   # rm -rf build .build
 - **SwiftUI 代码不得依赖宏展开的 API**（`@State` / `@StateObject` / `@Environment` / `@Bindable`）：macOS 27 SDK 起它们是外部宏，插件 `libSwiftUIMacros.dylib` 只随 Xcode 提供，CLT 下编译会以 `plugin for module 'SwiftUIMacros' not found` 失败。视图内可变状态一律用 `ObservableObject` + `@ObservedObject`。
 - 包管理 SwiftPM；唯一外部依赖 `TOMLKit`（`from: 0.6.0`）。不新增 Conan / CocoaPods / Carthage。
 - 签发只做本机 ad-hoc（`codesign --force --deep --sign -`），不做 Developer ID 公证。不新增 `LaunchAgent` plist，app 不自启。
-- provider 请求走 `URLSession.shared`，未配 `NSAppTransportSecurity` 例外；新增端点必须 HTTPS 且经 `normalizeBaseURL`（去尾斜杠 + 强制 https + 回退官方默认）。`Kimi` 的端点是写死的 https 国内站 `api.moonshot.cn`，不经 `normalizeBaseURL`。
+- provider 请求走 `URLSession.shared`，未配 `NSAppTransportSecurity` 例外；新增端点必须 HTTPS 且经 `normalizeBaseURL`（去尾斜杠 + 强制 https + 回退官方默认）。`Kimi` 的端点是写死的 https 国内站 `api.moonshot.cn`，不经 `normalizeBaseURL`。`OpenCode Go` 的 `base_url` 可能是 **OpenAI 兼容地址**（末尾 `…/inference/go/openai/v1`，kimi-code 就是这个写法）：`/usage` 挂在 `…/inference/go/v1/usage`，拼路径前必须摘掉 `openai` 段（`OpenCodeGoProvider.usageBaseURL`），否则 404。
 
 ## 测试
 

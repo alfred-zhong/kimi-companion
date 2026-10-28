@@ -99,7 +99,7 @@ func jsonDouble(_ v: Any?) -> Double? {
 // MARK: - OpenCode Go
 
 /// OpenCode Go（`opencode.ai/zen/go` 订阅网关）配额 provider：
-/// `GET <base_url>/usage`，`Authorization: Bearer <api_key>`。
+/// `GET <usage_base_url>/usage`，`Authorization: Bearer <api_key>`。
 ///
 /// 响应形状：
 /// ```json
@@ -107,13 +107,18 @@ func jsonDouble(_ v: Any?) -> Double? {
 ///           "weekly":{"status":"ok","percent":22,"resetsAt":"..."},
 ///           "monthly":{"status":"ok","percent":13,"resetsAt":"..."}}}
 /// ```
-/// 三条实测坑：
+/// 四条实测坑：
 /// 1. **尾部 `/` 会 401**（`…/v1/usage` → 200，`…/v1/usage/` → 401 `AuthError`），
 ///    故 base_url 先去掉尾斜杠再拼 `/usage`（`normalizeBaseURL`）。
 /// 2. **`x-opencode-session` 头不需要**：带与不带该头的响应逐字节一致，
 ///    且响应声明的 `access-control-allow-headers` 里根本没有它 —— 因此不解析 `custom_headers`。
 /// 3. `percent` 是 JSON 数字、含义是**已用**百分比（0-100）；`status` 原样保留，
 ///    `!= "ok"` 一律按已限流处理（菜单里进度条转红并带出原始状态串）。
+/// 4. kimi-code 里 `base_url` 配的是 **OpenAI 兼容地址**
+///    （`https://opencode.ai/inference/go/openai/v1`，客户端再拼 `/chat/completions`），
+///    而配额接口挂在产品路径下：`…/inference/go/openai/v1/usage` → **404**，
+///    `…/inference/go/v1/usage` → 200。两者只差一个 `openai` 路径段，
+///    故拼 `/usage` 前先摘掉该段（`usageBaseURL`）；老写法 `…/zen/go/v1` 没有这一段，原样使用。
 ///
 /// 三窗口 all-or-nothing：任一窗口缺失 / malformed → `invalidResponse`，不返回半截报告。
 public struct OpenCodeGoProvider: BalanceProvider {
@@ -126,9 +131,22 @@ public struct OpenCodeGoProvider: BalanceProvider {
 
     public static let defaultBaseURL = "https://opencode.ai/zen/go/v1"
 
-    /// `<base_url>/usage`；base_url 已去尾斜杠。
+    /// `/usage` 所在的 base：去尾斜杠，并摘掉 OpenAI 兼容地址里的 `openai` 路径段。
+    /// 例：`https://opencode.ai/inference/go/openai/v1` → `https://opencode.ai/inference/go/v1`；
+    /// `https://opencode.ai/zen/go/v1` 原样返回。
+    public static func usageBaseURL(_ raw: String?) -> String {
+        let base = normalizeBaseURL(raw, fallback: defaultBaseURL)
+        guard var components = URLComponents(string: base) else { return base }
+        var segments = components.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard let index = segments.firstIndex(where: { $0.lowercased() == "openai" }) else { return base }
+        segments.remove(at: index)
+        components.path = "/" + segments.joined(separator: "/")
+        return components.url?.absoluteString ?? base
+    }
+
+    /// `<usageBaseURL>/usage`。
     public static func usageURL(baseURL: String?) -> URL {
-        URL(string: normalizeBaseURL(baseURL, fallback: defaultBaseURL) + "/usage")!
+        URL(string: usageBaseURL(baseURL) + "/usage")!
     }
 
     public func hasCredential(creds: any CredentialSource) -> Bool {

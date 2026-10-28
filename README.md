@@ -58,6 +58,8 @@ Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock �
 
 三个都用 `Authorization: Bearer <api_key>`，超时 10 秒。`DeepSeek` / `OpenCode Go` 的 `base_url` 若在 `config.toml` 里配了则以它为准（去掉尾部 `/` 后拼接路径）；非 HTTPS 或不带 host 的值会被忽略并回退到上表的官方默认地址。**`Kimi` 不适用这条**：地址写死国内站 `api.moonshot.cn`，`base_url` 一律不读——响应里没有 currency 字段，币种由站点隐含（`api.moonshot.cn` = CNY，`api.moonshot.ai` = USD），本 app 只服务国内站。
 
+`OpenCode Go` 的 `base_url` 允许按 **OpenAI 兼容地址**写（`https://opencode.ai/inference/go/openai/v1`，kimi-code 里常见）：配额接口挂在产品路径下，拼接 `/usage` 前会先摘掉 `openai` 段，实际请求 `…/inference/go/v1/usage`；直接拼会得到 404。老写法 `https://opencode.ai/zen/go/v1` 行为不变。
+
 `Kimi` 展示的 `data.available_balance` = 现金 + 代金券，就是「还能不能调用推理 API」的那个数：`≤ 0` 时该行会追加 ` ⚠`。`code != 0`、`status != true`、`data` 缺失或三个余额字段（`available_balance` / `voucher_balance` / `cash_balance`）任一不可解析都判为 `响应解析失败`，绝不展示凭空的 `¥0.00`。凭据来源见下「`Kimi` 的凭据例外」。
 
 ## 凭据
