@@ -136,7 +136,7 @@ make clean   # rm -rf build .build
 | `UI/CleanupAlertPresenter.swift` | `NSAlert` 接线（预览 / 结果 / 固定 220pt 可滚动等宽详情区）；LSUIElement 下弹窗前自己抢焦点 |
 | `UI/SettingsWindow.swift` | `SettingsStore`（`@Published` × 镜像 UserDefaults）+ `NSHostingController<SettingsView>`（刷新间隔 + 清理策略两项 `Stepper`；Keep Count 范围 `0…20`，`0` 显示「不保留」） |
 | `Brand/LogoCatalog.swift` | `ProviderID` → `NSImage` 查表 + template 标记；未知 provider 返回 nil |
-| `Resources/Info.plist` | **`LSUIElement=true`**、`CFBundleIdentifier=com.alfred-zhong.kimi-companion`、`CFBundleIconFile=AppIcon`、`LSMinimumSystemVersion=13.0`、版本 `0.4.0`（build `5`，与 `META` 同步） |
+| `Resources/Info.plist` | **`LSUIElement=true`**、`CFBundleIdentifier=com.alfred-zhong.kimi-companion`、`CFBundleIconFile=AppIcon`、`LSMinimumSystemVersion=13.0`、版本 `0.4.2`（build `7`，与 `META` 同步） |
 | `Resources/provider_*.png` | 菜单栏 logo（`@2x` / `@3x`，无 `.color.png` 兜底） |
 | `Resources/AppIcon.icns` | app 图标（`CFBundleIconFile` 指向；Finder / `NSAlert` 用）。由 `Tools/make-appicon.swift` 生成，勿手改 |
 | `Tools/make-appicon.swift` | 图标生成脚本（不在 SwiftPM target 里，`swift Tools/make-appicon.swift` 直接跑；改设计改这里再重新生成） |

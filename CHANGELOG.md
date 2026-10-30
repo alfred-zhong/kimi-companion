@@ -40,6 +40,8 @@
 
 ### Bug 修复
 
+- 清理预览弹窗从状态栏菜单弹出时 app 没有变成前台、面板也不是 key 窗口：`NSApp.activate(ignoringOtherApps:)` 从 macOS 14 起已废弃且对 `LSUIElement` app 常被忽略（实测 AppleScript `activate`、`open -a`、点自己的窗口都无法让它成为前台）。改为在 `present(_:)` 里补 `NSRunningApplication.current.activate(options: [.activateAllWindows])` 并显式 `makeKeyAndOrderFront`，避免面板以非 key 状态接收键盘与滚动事件。
+- 清理预览弹窗的详情区用触控板滚动发顿：`NSAlert` 自己的视图（图标 / 文本 / 按钮）都带 layer，唯独 `accessoryView` 传进去的滚动子树默认没有 layer，而 alert 窗口是 `isOpaque == false` 的半透明面板 —— 每次滚动都要在窗口后备存储上重绘新露出的区域、再和面板材质重新合成。给详情区的 `NSScrollView` 打开 `wantsLayer`（clip view 变成可平移的 layer 纹理），并给排版管理器开 `allowsNonContiguousLayout`（超长明细首次滚到底不再从头顺序排版）。
 - OpenCode Go 三个窗口的进度条过短：右区此前固定预留 168pt 而实际文案（`4h17m 后重置`）只占 ~80pt，条长被压到下限 60pt 且每行右侧留一大块空白。改为按本行文本实测预留宽度（下限 84pt，更长时按实测加宽），条长下限提到 150pt，整行铺满宽度。
 - 进度条行右侧的 `xxx 后重置` 距菜单右缘仅 ~12pt，比其他菜单项（分隔线 / 快捷键列停在 ~15pt）更贴边。右区文本改留 `trailingRightMargin`(20pt)，实测距右缘 ~18pt，成为菜单里最内缩的一列。
 - OpenCode Go 余量抓不到：kimi-code 的 `[providers."OpenCode Go"] base_url` 是 OpenAI 兼容地址 `https://opencode.ai/inference/go/openai/v1`，而配额接口挂在产品路径 `…/inference/go/v1/usage`。此前直接拼 `/usage` 得到 `…/openai/v1/usage` → **404**（菜单栏降级为 `⚠︎`）。现在拼 `/usage` 前先摘掉 `openai` 路径段（`OpenCodeGoProvider.usageBaseURL`），老写法 `https://opencode.ai/zen/go/v1` 行为不变。

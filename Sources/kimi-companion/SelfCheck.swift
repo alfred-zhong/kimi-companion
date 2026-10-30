@@ -2105,6 +2105,11 @@ public enum SelfCheck {
                 check("Cleanup.alert.detailText", textView?.string == preview.detail)
                 check("Cleanup.alert.detailMonospaced", textView?.font?.isFixedPitch == true)
                 check("Cleanup.alert.detailNotEditable", textView?.isEditable == false)
+                // 详情区是半透明 alert 面板里唯一默认不带 layer 的滚动子树：不开 layer 时每帧都要
+                // 回窗口后备存储重绘再合成，触控板滚动发顿。这里把「走 CA 滚动路径」钉住。
+                check("Cleanup.alert.detailLayerBacked", scroll?.wantsLayer == true)
+                check("Cleanup.alert.detailNonContiguousLayout",
+                      textView?.layoutManager?.allowsNonContiguousLayout == true)
 
                 let singleAlert = CleanupAlertPresenter.makeAlert(diagnostic)
                 singleAlert.layout()
