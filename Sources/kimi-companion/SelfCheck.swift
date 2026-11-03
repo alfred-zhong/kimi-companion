@@ -2115,6 +2115,25 @@ public enum SelfCheck {
                 singleAlert.layout()
                 check("Cleanup.alert.singleButtonTitle", singleAlert.buttons.map(\.title) == ["好"])
                 check("Cleanup.alert.noAccessoryWithoutDetail", singleAlert.accessoryView == nil)
+
+                // 上屏位置：`positionWindow` 必须在 `makeKeyAndOrderFront` 之前把窗口摆好。
+                // 否则窗口停在 `NSAlert` 的默认 frame 上（屏幕左上），`runModal()` 不再居中。
+                let placedAlert = CleanupAlertPresenter.makeAlert(preview)
+                CleanupAlertPresenter.positionWindow(placedAlert)
+                let placedWindow = placedAlert.window
+                let screen = placedWindow.screen ?? NSScreen.main
+                check("Cleanup.alert.windowOnScreen", screen != nil)
+                if let visible = screen?.visibleFrame {
+                    let frame = placedWindow.frame
+                    let leftGap = frame.minX - visible.minX
+                    let rightGap = visible.maxX - frame.maxX
+                    check("Cleanup.alert.windowHorizontallyCentered", abs(leftGap - rightGap) <= 1)
+                    check(
+                        "Cleanup.alert.windowWithinVisibleFrame",
+                        frame.minX >= visible.minX && frame.maxX <= visible.maxX
+                            && frame.minY >= visible.minY && frame.maxY <= visible.maxY
+                    )
+                }
             }
         }
 

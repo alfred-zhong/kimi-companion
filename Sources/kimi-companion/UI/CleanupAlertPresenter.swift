@@ -16,6 +16,7 @@ public enum CleanupAlertPresenter {
     @discardableResult
     public static func present(_ content: CleanupAlertContent) -> Bool {
         let alert = makeAlert(content)
+        positionWindow(alert)
         // LSUIElement app 从状态栏菜单弹出面板时，`NSApp.activate(ignoringOtherApps:)`（macOS 14 起
         // 已废弃）经常不生效：面板显示在最上层，但 app 仍不是前台、窗口也不是 key —— 键盘交互和
         // 滚动都会被系统按「非活动 app」降级。补一次显式激活 + 把面板显式设成 key。
@@ -34,6 +35,19 @@ public enum CleanupAlertPresenter {
         response: NSApplication.ModalResponse
     ) -> Bool {
         content.confirmable && response == .alertFirstButtonReturn
+    }
+
+    /// 把弹窗摆到系统常态位置（水平居中、略高于垂直中线）。
+    ///
+    /// `NSAlert` 的定位在 `runModal()` 内部完成，而本 app 为了给 LSUIElement 的弹窗拿到 key 焦点，
+    /// 必须先 `makeKeyAndOrderFront` —— 窗口一上屏 `runModal()` 就不再挪动它，弹窗会停在 `NSAlert`
+    /// 窗口的默认 frame 上（屏幕左上，且与内容尺寸无关，只有 `layout()` 之后的尺寸变化），实测在这台
+    /// 1470×956 的屏幕上左右留白 211 / 727。因此把「先布局、再居中」提前到上屏之前，得到的位置与
+    /// `runModal()` 自己算出的一致（`center()` 在 alert 窗口上给出的是水平居中 + 上方留 1/4、下方留
+    /// 3/4 的剩余高度，不是几何中心）。
+    public static func positionWindow(_ alert: NSAlert) {
+        alert.layout()
+        alert.window.center()
     }
 
     /// 按内容装配 `NSAlert`（不含 modal 循环）。

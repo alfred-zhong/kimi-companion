@@ -41,6 +41,7 @@
 ### Bug 修复
 
 - 清理预览弹窗从状态栏菜单弹出时 app 没有变成前台、面板也不是 key 窗口：`NSApp.activate(ignoringOtherApps:)` 从 macOS 14 起已废弃且对 `LSUIElement` app 常被忽略（实测 AppleScript `activate`、`open -a`、点自己的窗口都无法让它成为前台）。改为在 `present(_:)` 里补 `NSRunningApplication.current.activate(options: [.activateAllWindows])` 并显式 `makeKeyAndOrderFront`，避免面板以非 key 状态接收键盘与滚动事件。
+- 清理预览 / 结果弹窗不居中，而是停在屏幕左上（实测 1470×956 屏幕上左右留白 211 / 727）：`NSAlert` 的定位在 `runModal()` 内部完成，而上面那条修复让窗口先 `makeKeyAndOrderFront` 上屏，窗口一上屏就不再被挪动，于是停在 `NSAlert` 窗口的默认 frame 上（与内容尺寸无关）。新增 `CleanupAlertPresenter.positionWindow(_:)`，在抢焦点之前先 `layout()` + `center()`，位置与 `runModal()` 自己算出来的一致（水平居中；垂直方向是上方留 1/4、下方留 3/4 的剩余高度，即系统 alert 的常态位置，而非几何正中）。`SelfCheck` 断言窗口落在可见屏幕内且左右留白相等。
 - 清理预览弹窗的详情区用触控板滚动发顿：`NSAlert` 自己的视图（图标 / 文本 / 按钮）都带 layer，唯独 `accessoryView` 传进去的滚动子树默认没有 layer，而 alert 窗口是 `isOpaque == false` 的半透明面板 —— 每次滚动都要在窗口后备存储上重绘新露出的区域、再和面板材质重新合成。给详情区的 `NSScrollView` 打开 `wantsLayer`（clip view 变成可平移的 layer 纹理），并给排版管理器开 `allowsNonContiguousLayout`（超长明细首次滚到底不再从头顺序排版）。
 - OpenCode Go 三个窗口的进度条过短：右区此前固定预留 168pt 而实际文案（`4h17m 后重置`）只占 ~80pt，条长被压到下限 60pt 且每行右侧留一大块空白。改为按本行文本实测预留宽度（下限 84pt，更长时按实测加宽），条长下限提到 150pt，整行铺满宽度。
 - 进度条行右侧的 `xxx 后重置` 距菜单右缘仅 ~12pt，比其他菜单项（分隔线 / 快捷键列停在 ~15pt）更贴边。右区文本改留 `trailingRightMargin`(20pt)，实测距右缘 ~18pt，成为菜单里最内缩的一列。
