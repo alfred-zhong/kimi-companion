@@ -178,8 +178,8 @@ public enum StatusBarPresenter {
     /// **只看选中 provider**：另一个 provider 的状态再糟也不影响菜单栏，网络抖动更不会把菜单栏
     /// 自动切到另一个 provider。
     ///
-    /// 守护激活时在余额右侧追加 ` ☕`（咖啡色），并把数值两侧补空格避免胶囊裁切 ——
-    /// 视觉焦点留给主信息。
+    /// 守护激活时只在余额右侧追加 ` ☕`（咖啡色），不改变 `logoTextGap` ——
+    /// 激活前后 logo 与数值的间距必须完全一致。
     public static func renderTitle(_ inputs: Inputs) -> NSAttributedString {
         let active = inputs.caffeinateSession != nil
 
@@ -191,12 +191,10 @@ public enum StatusBarPresenter {
         let state = inputs.balance(for: inputs.selectedProvider)
         if let result = state.result {
             let text = BalanceFormatter.statusBarText(result)
-            return compose(body: active ? " \(text) " : text, caffeinateActive: active)
+            return compose(body: text, caffeinateActive: active)
         }
         if let failure = state.failure {
-            let tag = failure.statusBarTag
-            let body = active ? " ⚠︎\(tag) " : "⚠︎\(tag)"
-            return compose(body: body, caffeinateActive: active)
+            return compose(body: "⚠︎\(failure.statusBarTag)", caffeinateActive: active)
         }
         return NSAttributedString(string: "\(logoTextGap)···")
     }

@@ -1353,10 +1353,12 @@ public enum SelfCheck {
                   StatusBarPresenter.renderTitle(.init(selectedProvider: .opencodeGo, balances: [.deepseek: dsState])).string
                   == "\u{2009}\u{2009}···")
 
-            // 6) caffeinate：补空格 + ☕ 咖啡色结尾。
+            // 6) caffeinate：只在末尾追加 ` ☕`，logo 与数值的间距保持不变。
             let session = CaffeinateSession(bucket: .sixtyMinutes, startedAt: now, endAt: now.addingTimeInterval(3600))
             let active = StatusBarPresenter.renderTitle(.init(selectedProvider: .deepseek, balances: [.deepseek: dsState], caffeinateSession: session))
-            check("Title.active.padded", active.string == "\u{2009}\u{2009} ¥65.92  \u{2615}")
+            check("Title.active.padded", active.string == "\u{2009}\u{2009}¥65.92 \u{2615}")
+            check("Title.active.sameGap", active.string == StatusBarPresenter.renderTitle(dsSelected).string + " \u{2615}")
+            check("Title.active.noLeadingPad", !active.string.hasPrefix("\u{2009}\u{2009} "))
             check("Title.active.coffeeAtEnd", active.string.hasSuffix(" \u{2615}"))
             if let idx = active.string.range(of: "\u{2615}")?.lowerBound {
                 let offset = active.string.distance(from: active.string.startIndex, to: idx)
@@ -1367,7 +1369,9 @@ public enum SelfCheck {
             }
             // 失败分支也带 ☕（与 omp 的 balanceUnavailable 分支一致）。
             let activeFailure = StatusBarPresenter.renderTitle(.init(selectedProvider: .deepseek, balances: [.deepseek: dsFetchFail], caffeinateSession: session))
-            check("Title.active.failureCoffee", activeFailure.string == "\u{2009}\u{2009} ⚠︎  \u{2615}")
+            check("Title.active.failureCoffee", activeFailure.string == "\u{2009}\u{2009}⚠︎ \u{2615}")
+            check("Title.active.failureSameGap", activeFailure.string
+                == StatusBarPresenter.renderTitle(.init(selectedProvider: .deepseek, balances: [.deepseek: dsFetchFail])).string + " \u{2615}")
         }
 
         // MARK: - StatusBarPresenter.renderChrome
