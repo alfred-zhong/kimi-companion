@@ -49,3 +49,13 @@ token 用量只保留**一份**合并的数字，不再按 provider / model 区�
 - `kind: "compaction"` 的上下文压缩调用也计入——它同样是一次真实的模型请求。
 - `TokenStats` 因此从「纯 token 聚合」扩为「窗口用量聚合」（token + 请求次数）。请求次数不参与 `cacheHitRate` / `totalInputTokens` / `realConsumptionTokens` 等任何 token 派生量；`isEmpty` 把它算作「有内容」（只有请求、没有 token 的窗口不是空窗口）。
 - 已知偏差：`llm.request.time` 是发起时刻、`usage.record.time` 是返回时刻，一次跨零点或跨桶边界的调用会把「请求」记在前一个窗口、「token」记在后一个窗口。偏差量级是单次调用的时长（秒级），不影响日 / 小时粒度。**不为此引入配对逻辑**——配对会把重试与中断的尝试重新变成不可见的量，正好丢掉这个指标最有价值的部分。
+
+### 请求次数的信号换成 `step.begin`（2026-11-13）
+
+上面那条改动了计数来源，理由只有一个：**`llm.request` 不再是一个跨客户端可靠的信号**。
+
+- 实测（2026-11-13，本机 18 个当日 wire 文件）：Kimi Code **桌面版** session 当日写出 **498 条 `usage.record`、0 条 `llm.request`**，菜单里的「今日请求」因此塌到 5（那 5 条来自唯一的 CLI session）。同一客户端在 11-07…11-12 的 `llm.request` 与 `usage.record` 还接近 1:1，是当天的版本变更把它变成了只由 CLI 写。
+- `context.append_loop_event` 的 `event.type == "step.begin"` 是两种客户端都写的「发起一次模型调用」标记：全量 67 个 wire 文件核过，**每个有请求的文件都有它**，且几乎总是 ≥ `usage.record`（实测某桌面 session 133 : 123、CLI session 5 : 5）。
+- 因此 `WireLineParser` 只认两种行：`usage.record`（token 四项、`requestCount = 0`）与 `step.begin`（`requestCount = 1`、token 全 0）。`llm.request` **不再计入**——CLI 也同时写 `step.begin`，两个都数必然双计。同一行族的 `content.part` / `tool.call` / `step.end` 一律不计（`content.part` 正文里出现 `step.begin` 字样也不能误计）。
+- 口径从「尝试」收窄为「发起」：被打断（`turn.cancel` / `prompt.aborted`）的尝试仍计入，但同一 step 内的重试（`turn.step.retrying`）不新开 `step.begin`，这部分不再单独计数。代价可忽略（全量实测只有一个旧文件 394 条 `llm.request` vs 391 条 `step.begin`），换来的是跨客户端不再归零。
+- 保留窗口、mtime 剪枝、去重键、桶边界、跨零点偏差与「不为配对引入逻辑」全部沿用上面那条；`step.begin.time` 与 `usage.record.time` 同样是「发起 / 返回」两个时刻。

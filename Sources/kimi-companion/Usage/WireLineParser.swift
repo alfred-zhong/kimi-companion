@@ -1,29 +1,30 @@
 import Foundation
 
-/// `wire.jsonl` 单行解析：认 `usage.record` 与 `llm.request` 两种行。
+/// `wire.jsonl` 单行解析：认 `usage.record`（token）与 `step.begin`（请求次数）两种行。
 ///
-/// 一次模型调用在 wire 里留两条行（形状如下，`llm.request` 在前、`usage.record` 在后）：
+/// 一次模型调用在 wire 里留两条行（形状如下，`step.begin` 在前、`usage.record` 在后）：
 /// ```json
-/// {"type":"llm.request","agentId":"main","provider":"openai","model":"deepseek-v4.1-flash",
-///  "modelAlias":"OpenCode Go/deepseek-v4.1-flash","kind":"loop","turnStep":"0.1","time":1791598954798}
+/// {"type":"context.append_loop_event","agentId":"main",
+///  "event":{"type":"step.begin","uuid":"1f6250fd-…","turnId":"0","step":1},"time":1794549319126}
 /// {"type":"usage.record","agentId":"main","model":"OpenCode Go/deepseek-v4.1-flash",
 ///  "usage":{"inputOther":18938,"output":187,"inputCacheRead":145024,"inputCacheCreation":0},
-///  "usageScope":"turn","time":1791598959387}
+///  "usageScope":"turn","time":1794549322442}
 /// ```
 /// 五条实测结论：
 /// 1. `time` 是 **epoch 毫秒**；文件里没有任何 ISO 时间字段（`usage.record` 上尤其没有）。
 /// 2. `usage.record` 是**单次 LLM 调用的增量**，不是累计快照
 ///    （同一 session 的 `output` 序列实测非单调：187 → 165 → 170 → 1654 → …）。
 ///    因此直接按其字段求和，**不做差分**。
-/// 3. `llm.request` 在**发起前**落盘（`time` = 发起时刻），`usage.record` 在**返回后**落盘（`time` = 返回时刻）。
-///    两者对同一次调用配对，但**不是一一对应**：重试（`turn.step.retrying`）与被中断
-///    （`turn.step.interrupted` / `turn.cancel` / `prompt.aborted`）的尝试只有 `llm.request`。
-///    因此 `llm.request` 行数 ≥ `usage.record` 行数（本机 83 个 wire 文件实测 3133 : 3103）。
-/// 4. `llm.request` 只贡献 `requestCount = 1`（token 计数全 0），`usage.record` 只贡献 token
-///    （`requestCount = 0`）——一条行只产出一个 `UsageEvent`，两种事实各自求和。
-/// 5. 不读 `model` / `modelAlias`：用量与请求数都已合并统计、不归属到 provider（ADR-0006），
-///    parser 不解析任何归属字段。（历史依据：`llm.request.provider` 的值是 wire 协议类型 `"openai"`，
-///    所有 provider 都是它，本来也不能用于归属。）
+/// 3. 请求次数取 `context.append_loop_event` 里 `event.type == "step.begin"` 的行，**不取** `llm.request`。
+///    实测（2026-11-13，本机 67 个 wire 文件）Kimi Code **桌面版**根本不写 `llm.request`
+///    （当日 0 条 `llm.request` / 498 条 `usage.record`），只有 CLI 写；`step.begin` 两种客户端都写，
+///    是唯一客户端无关的「发起了一次模型调用」标记。同一时间窗内两种信号并存时 `step.begin` 不重复计。
+/// 4. `step.begin` 在**发起前**落盘（`time` = 发起时刻），`usage.record` 在**返回后**落盘（`time` = 返回时刻）。
+///    两者**不是一一对应**：被打断（`turn.cancel` / `prompt.aborted`）的尝试只有 `step.begin`。
+///    因此 `step.begin` 行数 ≥ `usage.record` 行数（实测某桌面 session 133 : 123）。
+///    同一 step 内的重试（`turn.step.retrying`）不新开 `step.begin`，这部分尝试不计入。
+/// 5. 不读 `model` / `modelAlias` / `provider`：用量与请求数都已合并统计、不归属到 provider（ADR-0006），
+///    parser 不解析任何归属字段。
 public struct WireLineParser: Sendable {
     public init() {}
 
@@ -34,8 +35,9 @@ public struct WireLineParser: Sendable {
     ///   - lineOffset: 该行在文件中的起始字节偏移，用作去重键的稳定序号
     public func parse(line: String, relPath: String, lineOffset: UInt64) -> UsageEvent? {
         // 行预过滤：必须含两种行标识之一（一行可达 21 KB，先做零解析的拒否）。
-        // 嵌入在 `context.append_loop_event` 里的同名字符串会通过这一关，但被下面的 `type` 判定挡掉。
-        guard line.contains("\"usage.record\"") || line.contains("\"llm.request\"") else { return nil }
+        // `context.append_loop_event` 的其它事件（content.part / tool.call / step.end）会通过这一关，
+        // 但被下面的 `type` 判定挡掉。
+        guard line.contains("\"usage.record\"") || line.contains("\"step.begin\"") else { return nil }
         guard let data = line.data(using: .utf8) else { return nil }
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         guard let tsMs = int64Value(json["time"]) else { return nil }
@@ -52,7 +54,10 @@ public struct WireLineParser: Sendable {
                 requestCount: 0,
                 dedupeKey: "\(relPath):\(lineOffset)"
             )
-        case "llm.request":
+        case "context.append_loop_event":
+            // 只有 `step.begin` 算一次请求；同一行族的 content.part / tool.call / step.end 一律不计。
+            guard let event = json["event"] as? [String: Any],
+                  event["type"] as? String == "step.begin" else { return nil }
             return UsageEvent(
                 tsMs: tsMs,
                 inputOther: 0,
@@ -86,7 +91,7 @@ public struct UsageEvent: Sendable, Equatable {
     public let output: Int
     public let cacheRead: Int
     public let cacheCreation: Int
-    /// `1` = 一条 `llm.request`（发起一次调用）；`0` = 一条 `usage.record`（拿到一次调用的 usage）。
+    /// `1` = 一条 `step.begin`（发起一次调用）；`0` = 一条 `usage.record`（拿到一次调用的 usage）。
     public let requestCount: Int
     public let dedupeKey: String
 
