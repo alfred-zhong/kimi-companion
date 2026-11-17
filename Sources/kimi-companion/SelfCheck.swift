@@ -141,15 +141,17 @@ public enum SelfCheck {
         // `fromModelPrefix` 现在唯一的调用方是 `fromDefaultModel`（首启菜单栏 provider 推导）；
         // 用量已不再按 `model` 前缀归属（ADR-0006），这里覆盖的是推导路径本身。
         check("Provider.deepseek.verbatim", ProviderID.fromModelPrefix("DeepSeek") == .deepseek)
-        check("Provider.openCodeGo.verbatim", ProviderID.fromModelPrefix("OpenCode Go") == .opencodeGo)
-        check("Provider.openCodeGo.rawValue", ProviderID.fromModelPrefix("opencode-go") == .opencodeGo)
+        // 休眠的 OpenCode Go 不再参与前缀匹配（ADR-0010），但 case 本身仍可解析。
+        check("Provider.dormant.verbatimIsUnknown", ProviderID.fromModelPrefix("OpenCode Go") == .unknown)
+        check("Provider.dormant.rawValueIsUnknown", ProviderID.fromModelPrefix("opencode-go") == .unknown)
+        check("Provider.dormant.caseRetained", ProviderID(rawValue: "opencode-go") == .opencodeGo)
         check("Provider.kimi.verbatim", ProviderID.fromModelPrefix("Kimi") == .kimi)
         check("Provider.kimi.rawValue", ProviderID.fromModelPrefix("kimi") == .kimi)
         // `Moonshot` 是 Kimi 背后的开放平台名，但不是 config 段名也不是 rawValue → 不匹配任何 provider。
         check("Provider.kimi.moonshotIsUnknown", ProviderID.fromModelPrefix("Moonshot") == .unknown)
         check("Provider.unknown", ProviderID.fromModelPrefix("agent-loop") == .unknown)
         check("Provider.empty", ProviderID.fromModelPrefix("") == .unknown)
-        check("Provider.fromDefaultModel", ProviderID.fromDefaultModel("OpenCode Go/deepseek-v4.1-flash") == .opencodeGo)
+        check("Provider.fromDefaultModel.dormantIsUnknown", ProviderID.fromDefaultModel("OpenCode Go/deepseek-v4.1-flash") == .unknown)
         check("Provider.fromDefaultModel.deepseek", ProviderID.fromDefaultModel("DeepSeek/deepseek-flash") == .deepseek)
         check("Provider.fromDefaultModel.kimi", ProviderID.fromDefaultModel("Kimi/k3") == .kimi)
         check("Provider.fromDefaultModel.noSlash", ProviderID.fromDefaultModel("deepseek-flash") == .unknown)
@@ -159,13 +161,15 @@ public enum SelfCheck {
         check("Provider.kimi.rawValueLiteral", ProviderID.kimi.rawValue == "kimi")
         check("Provider.kimi.sectionName", ProviderID.kimi.configSectionName == "Kimi")
         check("Provider.kimi.displayName", ProviderID.kimi.displayName == "Kimi")
-        check("Provider.supportedOrder", ProviderID.supported == [.deepseek, .opencodeGo, .kimi])
+        check("Provider.supportedOrder", ProviderID.supported == [.deepseek, .kimi])
         check("Provider.supportedExcludesUnknown", !ProviderID.supported.contains(.unknown))
+        check("Provider.supportedExcludesDormant", !ProviderID.supported.contains(.opencodeGo))
         check("Provider.allCasesIncludesUnknown", ProviderID.allCases.contains(.unknown))
+        check("Provider.allCasesIncludesDormant", ProviderID.allCases.contains(.opencodeGo))
 
         // MARK: - MenuBarSelection（首启默认 provider）
 
-        check("Selection.fromConfig", MenuBarSelection.deriveDefault(fromDefaultModel: "OpenCode Go/deepseek-v4.1-flash") == .opencodeGo)
+        check("Selection.dormantFallsBack", MenuBarSelection.deriveDefault(fromDefaultModel: "OpenCode Go/deepseek-v4.1-flash") == .deepseek)
         check("Selection.deepseek", MenuBarSelection.deriveDefault(fromDefaultModel: "DeepSeek/deepseek-flash") == .deepseek)
         check("Selection.kimi", MenuBarSelection.deriveDefault(fromDefaultModel: "Kimi/k3") == .kimi)
         check("Selection.fallbackOnUnknown", MenuBarSelection.deriveDefault(fromDefaultModel: "zenmux/foo") == .deepseek)
@@ -464,8 +468,11 @@ public enum SelfCheck {
             check("Registry.deepseek.readsBaseURL",
                   (BalanceRegistry.provider(for: .deepseek, config: cfg) as? DeepSeekProvider)?.baseURL == nil)
             check("Registry.unknown.nil", BalanceRegistry.provider(for: .unknown, config: cfg) == nil)
-            check("Registry.all.count", BalanceRegistry.all(config: cfg).count == 3)
-            check("Registry.all.order", BalanceRegistry.all(config: cfg).map(\.id) == [.deepseek, .opencodeGo, .kimi])
+            check("Registry.all.count", BalanceRegistry.all(config: cfg).count == 2)
+            check("Registry.all.order", BalanceRegistry.all(config: cfg).map(\.id) == [.deepseek, .kimi])
+            // 休眠 provider 的路由仍保留（ADR-0010），恢复后不需要改 registry。
+            check("Registry.dormant.routeRetained",
+                  BalanceRegistry.provider(for: .opencodeGo, config: cfg)?.id == .opencodeGo)
         }
 
         // MARK: - Provider fetch（请求头 / 走 fake HTTP）
@@ -591,8 +598,8 @@ public enum SelfCheck {
             check("Config.emptyAPIKeyIsNil", cfg.provider("managed:kimi-code")?.apiKey == nil)
             // 不存在的段。
             check("Config.missingSection", cfg.provider("MiniMax") == nil)
-            // `Kimi` 没有 `[providers.Kimi]` 段（凭据来自 `[services.moonshot_*]`，ADR-0008），
-            // 因此「supported 每个都有 provider 段」这条守卫只对读 provider 段的两个成立。
+            // 「supported 每个都有 provider 段」这条守卫只对读 provider 段的 provider 成立
+            // （含休眠的 OpenCode Go：它仍按段名取凭据，恢复后不需要改配置）。
             check("Config.missingSectionGuard",
                   [ProviderID.deepseek, .opencodeGo].allSatisfy { cfg.provider($0.configSectionName) != nil })
             check("Config.kimiHasNoProviderSection", cfg.provider(ProviderID.kimi.configSectionName) == nil)
@@ -737,31 +744,43 @@ public enum SelfCheck {
             http.bodyByPath["/v1/users/me/balance"] = #"{"code":0,"data":{"available_balance":49.58894,"voucher_balance":46.58893,"cash_balance":3.00001},"status":true}"#
 
             let source = LiveBalanceSource(config: KimiConfigSource(configPath: configPath), http: http)
+
+            // 休眠的 OpenCode Go 不在 `capture` 循环里（ADR-0010）；它的凭据判定 / 请求 /
+            // 解码由 `captureOne` 直接覆盖，恢复 provider 时这些断言原样复用。
+            func dormantCapture() -> ProviderCapture {
+                guard case .loaded(let cfg) = source.config.load() else {
+                    return ProviderCapture(failure: .configUnreadable("config.toml 不可读"))
+                }
+                return sync { await source.captureOne(.opencodeGo, cfg: cfg, creds: TomlCredentialSource(config: cfg)) }
+            }
+
             let capture = sync { await source.capture(now: now) }
+            let dormant = dormantCapture()
             // `ProviderID.supported` 每个都有键：即使某个 provider 失败，事实也照记。
-            check("Source.perProvider.count", capture.perProvider.count == 3)
+            check("Source.perProvider.count", capture.perProvider.count == 2)
+            check("Source.perProvider.excludesDormant", !capture.perProvider.keys.contains(.opencodeGo))
             check("Source.deepseek.value", capture.capture(for: .deepseek).result?.balance == 65.92)
-            check("Source.opencode.value", capture.capture(for: .opencodeGo).result?.usedPercent == 16)
+            check("Source.dormant.value", dormant.result?.usedPercent == 16)
             check("Source.kimi.value", capture.capture(for: .kimi).result?.balance == 49.58894)
             check("Source.kimi.currency", capture.capture(for: .kimi).result?.currency == .cny)
             check("Source.kimi.noFailure", capture.capture(for: .kimi).failure == nil)
             check("Source.notConfigMissing", capture.configMissing == false)
             check("Source.defaultModel", capture.defaultModel == "OpenCode Go/deepseek-v4.1-flash")
-            // 三个 provider 各自打了自己的端点：DeepSeek / OpenCode Go 读 config 的 base_url，Kimi 写死国内站。
+            // 生效 provider 各打自己的端点（DeepSeek 读 config 的 `base_url`，Kimi 写死国内站）；
+            // 休眠 provider 被直接调用时同样读 config 的 `base_url`。
             check("Source.usedConfigBaseURL", Set(http.urls) == [
                 "https://api.deepseek.com/user/balance",
                 "https://opencode.ai/zen/go/v1/usage",
                 "https://api.moonshot.cn/v1/users/me/balance",
             ])
 
-            // 只让 OpenCode Go 失败：另两个必须不受影响。
-            http.statusByHost["opencode.ai"] = 401
+            // 只让 Kimi 失败：另一个必须不受影响。
+            http.statusByHost["api.moonshot.cn"] = 401
             let partial = sync { await source.capture(now: now) }
             check("Source.independent.deepseekStillOK", partial.capture(for: .deepseek).result?.balance == 65.92)
-            check("Source.independent.kimiStillOK", partial.capture(for: .kimi).result?.balance == 49.58894)
-            check("Source.independent.opencodeFailed", partial.capture(for: .opencodeGo).result == nil)
-            check("Source.independent.opencodeReason",
-                  partial.capture(for: .opencodeGo).failure == .fetch("鉴权失败 (401)"))
+            check("Source.independent.kimiFailed", partial.capture(for: .kimi).result == nil)
+            check("Source.independent.kimiReason",
+                  partial.capture(for: .kimi).failure == .fetch("鉴权失败 (401)"))
             check("Source.independent.deepseekNoFailure", partial.capture(for: .deepseek).failure == nil)
 
             // 段缺失：只有该 provider 报 providerMissing；`Kimi` 没有 provider 段可查，
@@ -775,7 +794,7 @@ public enum SelfCheck {
             http.statusByHost.removeAll()
             let missing = sync { await source.capture(now: now) }
             check("Source.sectionMissing.deepseekOK", missing.capture(for: .deepseek).result?.balance == 65.92)
-            check("Source.sectionMissing.opencode", missing.capture(for: .opencodeGo).failure == .providerMissing)
+            check("Source.sectionMissing.opencode", dormantCapture().failure == .providerMissing)
             check("Source.sectionMissing.kimi", missing.capture(for: .kimi).failure == .credentialSection(kimiNoSectionText))
 
             // 空 api_key。
@@ -789,7 +808,7 @@ public enum SelfCheck {
             try? Data(emptyKey.utf8).write(to: URL(fileURLWithPath: configPath))
             let empty = sync { await source.capture(now: now) }
             check("Source.emptyKey.deepseek", empty.capture(for: .deepseek).failure == .credentialEmpty)
-            check("Source.emptyKey.opencode", empty.capture(for: .opencodeGo).failure == .credentialEmpty)
+            check("Source.emptyKey.opencode", dormantCapture().failure == .credentialEmpty)
             check("Source.emptyKey.kimi", empty.capture(for: .kimi).failure == .credentialSection(kimiNoSectionText))
 
             // api_key_env：凭据不可解析，且明确与「空」区分。
@@ -803,7 +822,7 @@ public enum SelfCheck {
             try? Data(envKey.utf8).write(to: URL(fileURLWithPath: configPath))
             let envCapture = sync { await source.capture(now: now) }
             check("Source.envKey.deepseek", envCapture.capture(for: .deepseek).failure == .credentialEnv)
-            check("Source.envKey.opencodeOK", envCapture.capture(for: .opencodeGo).result != nil)
+            check("Source.envKey.opencodeOK", dormantCapture().result != nil)
             check("Source.envKey.kimi", envCapture.capture(for: .kimi).failure == .credentialSection(kimiNoSectionText))
 
             // Kimi 凭据段三种不可用形态：文案里的段名跟着首选段走，另两个 provider 不受牵连。
@@ -823,7 +842,7 @@ public enum SelfCheck {
                   kimiEmpty.capture(for: .kimi).failure == .credentialSection("services.moonshot_search 的 api_key 为空"))
             check("Source.kimi.emptyKey.doesNotDisturbOthers",
                   kimiEmpty.capture(for: .deepseek).result?.balance == 65.92
-                      && kimiEmpty.capture(for: .opencodeGo).result?.usedPercent == 16)
+                      && dormantCapture().result?.usedPercent == 16)
 
             let kimiEnvOnly = """
             [providers.DeepSeek]
@@ -849,19 +868,20 @@ public enum SelfCheck {
             check("Source.kimi.fetchFallbackSucceeds", kimiOnly.capture(for: .kimi).result?.balance == 49.58894)
             check("Source.kimi.fetchFallbackOthersMissing",
                   kimiOnly.capture(for: .deepseek).failure == .providerMissing
-                      && kimiOnly.capture(for: .opencodeGo).failure == .providerMissing)
+                      && dormantCapture().failure == .providerMissing)
 
             // config.toml 不可读 → 全局降级，每个都带 configUnreadable。
             let missingConfig = LiveBalanceSource(config: KimiConfigSource(configPath: "\(root.path)/gone.toml"), http: http)
             let unreadable = sync { await missingConfig.capture(now: now) }
             check("Source.configMissing.flag", unreadable.configMissing == true)
             check("Source.configMissing.deepseek", unreadable.capture(for: .deepseek).failure?.statusBarTag == "配置")
-            check("Source.configMissing.opencode", unreadable.capture(for: .opencodeGo).failure?.statusBarTag == "配置")
+            check("Source.configMissing.dormantNotFetched",
+                  unreadable.perProvider[.opencodeGo] == nil)
             check("Source.configMissing.kimi", unreadable.capture(for: .kimi).failure?.statusBarTag == "配置")
             check("Source.configMissing.noHTTP", unreadable.capture(for: .deepseek).result == nil)
         }
 
-        // MARK: - WireLineParser（usage.record + llm.request 解析）
+        // MARK: - WireLineParser（usage.record + step.begin 解析）
 
         do {
             let p = WireLineParser()
@@ -889,37 +909,43 @@ public enum SelfCheck {
             check("Wire.noModelFieldStillParsed",
                   p.parse(line: noModel, relPath: "a", lineOffset: 0)?.stats == TokenStats(inputTokens: 4, outputTokens: 2))
 
-            // 非 usage.record / llm.request 一律不计（含 metadata / agent.message.appended / token_counting.measured）。
+            // 非 usage.record / step.begin 一律不计（含 metadata / agent.message.appended / token_counting.measured）。
             let metadata = #"{"type":"metadata","protocol_version":"1.5","created_at":1790069942091}"#
             check("Wire.skip.metadata", p.parse(line: metadata, relPath: "a", lineOffset: 0) == nil)
             let appended = #"{"type":"agent.message.appended","kind":"text","agentId":"main","model":"agent-loop","message":{},"time":1}"#
             check("Wire.skip.agentMessage", p.parse(line: appended, relPath: "a", lineOffset: 0) == nil)
             let tokenCounting = #"{"type":"token_counting.measured","agentId":"main","tokens":123456,"time":1}"#
             check("Wire.skip.tokenCounting", p.parse(line: tokenCounting, relPath: "a", lineOffset: 0) == nil)
-            // `llm.tools_snapshot` 与 `llm.request` 前缀相近，但必须是两条不同的行。
             let toolsSnapshot = #"{"type":"llm.tools_snapshot","agentId":"main","toolsHash":"x","time":1}"#
             check("Wire.skip.llmToolsSnapshot", p.parse(line: toolsSnapshot, relPath: "a", lineOffset: 0) == nil)
 
-            // `llm.request` = 一次实际发起的调用：只贡献请求计数，token 全 0。
-            let llmRequest = #"{"type":"llm.request","provider":"openai","modelAlias":"OpenCode Go/deepseek-v4.1-flash","agentId":"main","kind":"loop","turnStep":"0.1","time":1791598954798}"#
-            let req = p.parse(line: llmRequest, relPath: "w/s/agents/main/wire.jsonl", lineOffset: 64)
+            // `step.begin` = 一次实际发起的调用：只贡献请求计数，token 全 0。
+            let stepBegin = #"{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.begin","uuid":"1f6250fd-036c-49d9-99e5-b8cc0bc90dc0","turnId":"0","step":1},"time":1794549319126}"#
+            let req = p.parse(line: stepBegin, relPath: "w/s/agents/main/wire.jsonl", lineOffset: 64)
             check("Wire.request.parsed", req != nil)
-            check("Wire.request.tsMs", req?.tsMs == 1791598954798)
+            check("Wire.request.tsMs", req?.tsMs == 1794549319126)
             check("Wire.request.countsOne", req?.requestCount == 1)
             check("Wire.request.statsRequestCount", req?.stats.requestCount == 1)
             check("Wire.request.noTokens", req?.stats.totalInputTokens == 0 && req?.stats.outputTokens == 0)
             check("Wire.request.dedupeKey", req?.dedupeKey == "w/s/agents/main/wire.jsonl:64")
-            // 归属字段（`model` / `modelAlias` / `provider`）一律不读：另一个前缀产出形状完全相同的请求事件。
-            let otherPrefixRequest = #"{"type":"llm.request","provider":"openai","modelAlias":"DeepSeek/deepseek-flash","agentId":"main","kind":"loop","time":7}"#
+            // 归属字段（`model` / `modelAlias` / `provider`）一律不读：另一个 agent / 前缀产出形状完全相同的请求事件。
+            let otherPrefixRequest = #"{"type":"context.append_loop_event","agentId":"agent-3","event":{"type":"step.begin","turnId":"7","step":14},"time":7}"#
             check("Wire.request.attributionIgnored",
                   p.parse(line: otherPrefixRequest, relPath: "a", lineOffset: 0)?.stats == TokenStats(requestCount: 1))
-            // 压缩调用（`kind: "compaction"`）也是一次真实请求，照常计入。
-            let compactionRequest = #"{"type":"llm.request","agentId":"main","kind":"compaction","messageCount":263,"time":8}"#
-            check("Wire.request.compactionCounted",
-                  p.parse(line: compactionRequest, relPath: "a", lineOffset: 0)?.stats == TokenStats(requestCount: 1))
-            // `llm.request` 缺 time → 不计（与 usage.record 同一要求）。
-            let requestNoTime = #"{"type":"llm.request","agentId":"main","kind":"loop"}"#
-            check("Wire.request.skip.noTime", p.parse(line: requestNoTime, relPath: "a", lineOffset: 0) == nil)
+            // 同一行族的其它事件不是请求：content.part（哪怕正文里出现 `step.begin`）与 step.end 都不计。
+            let contentPart = #"{"type":"context.append_loop_event","agentId":"main","event":{"type":"content.part","turnId":"0","step":1,"part":{"type":"think","think":"next tick logs step.begin"}},"time":9}"#
+            check("Wire.request.skip.contentPart", p.parse(line: contentPart, relPath: "a", lineOffset: 0) == nil)
+            let stepEnd = #"{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.end","turnId":"0","step":1,"finishReason":"tool_use"},"time":10}"#
+            check("Wire.request.skip.stepEnd", p.parse(line: stepEnd, relPath: "a", lineOffset: 0) == nil)
+            // `llm.request` 不再计入：桌面版不写它（2026-11-13 起当日实测 0 行），CLI 同时写 `step.begin`，
+            // 两个都数就会双计。
+            let llmRequest = #"{"type":"llm.request","provider":"openai","modelAlias":"OpenCode Go/deepseek-v4.1-flash","agentId":"main","kind":"loop","turnStep":"0.1","time":1791598954798}"#
+            check("Wire.request.skip.llmRequest", p.parse(line: llmRequest, relPath: "a", lineOffset: 0) == nil)
+            // 缺 time / 缺 event → 不计（不能用别的字段凑时间）。
+            let stepNoTime = #"{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.begin","step":1}}"#
+            check("Wire.request.skip.noTime", p.parse(line: stepNoTime, relPath: "a", lineOffset: 0) == nil)
+            let loopNoEvent = #"{"type":"context.append_loop_event","agentId":"main","note":"step.begin","time":11}"#
+            check("Wire.request.skip.noEvent", p.parse(line: loopNoEvent, relPath: "a", lineOffset: 0) == nil)
             // 反过来：usage.record 不贡献请求计数。
             check("Wire.usageRecord.countsNoRequest", ev?.requestCount == 0 && ev?.stats.requestCount == 0)
 
@@ -970,7 +996,7 @@ public enum SelfCheck {
             for bucket in snap.hourly.suffix(5) { union += bucket.stats }
             check("Agg.last5h.equalsUnionOfLast5Buckets", snap.last5h == union && union.inputTokens == 15)
 
-            // 请求次数与 token 走同一套边界、同一个桶轴：`llm.request` 事件（token 全 0、requestCount = 1）
+            // 请求次数与 token 走同一套边界、同一个桶轴：`step.begin` 事件（token 全 0、requestCount = 1）
             // 与 `usage.record` 事件一起落桶，两者互不干扰。
             let requestEvents: [UsageEvent] = [
                 event("r1", nowMs - HOUR_MS / 2, input: 0, output: 0, requests: 1),
@@ -1053,8 +1079,8 @@ public enum SelfCheck {
             func line(_ model: String, _ tsMs: Int64, output: Int = 1) -> String {
                 #"{"type":"usage.record","agentId":"main","model":"\#(model)","usage":{"inputOther":10,"output":\#(output),"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":\#(tsMs)}"# + "\n"
             }
-            func requestLine(_ tsMs: Int64) -> String {
-                #"{"type":"llm.request","agentId":"main","provider":"openai","modelAlias":"DeepSeek/deepseek-flash","kind":"loop","turnStep":"0.1","time":\#(tsMs)}"# + "\n"
+            func stepBeginLine(_ tsMs: Int64) -> String {
+                #"{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.begin","turnId":"0","step":1},"time":\#(tsMs)}"# + "\n"
             }
             func write(_ rel: String, _ content: String, mtime: Date = now) {
                 let url = root.appendingPathComponent(rel)
@@ -1154,10 +1180,10 @@ public enum SelfCheck {
             check("Reader.blankLines.count", blankReader.events(now: now).count == 1)
             check("Reader.blankLines.parity", keys(blankReader.events(now: now)) == oracle("blank"))
 
-            // 两种事件行混在同一文件里：增量读取、去重、窗口淘汰对 `llm.request` 一视同仁，
+            // 两种事件行混在同一文件里：增量读取、去重、窗口淘汰对 `step.begin` 一视同仁，
             // 且请求次数与 token 各自求和（token 只来自 usage.record 行）。
             write("mixed/wd_m_111122223333/session_8/agents/main/wire.jsonl",
-                  line("DeepSeek/deepseek-flash", nowMs - 30_000) + requestLine(nowMs - 25_000))
+                  line("DeepSeek/deepseek-flash", nowMs - 30_000) + stepBeginLine(nowMs - 25_000))
             let mixedReader = WireLogReader(sessionsRoot: root.appendingPathComponent("mixed").path)
             let mixedEvents = mixedReader.events(now: now)
             check("Reader.mixedKinds.count", mixedEvents.count == 2)
@@ -1181,7 +1207,7 @@ public enum SelfCheck {
                 #"{"type":"usage.record","agentId":"main","model":"DeepSeek/deepseek-flash","usage":{"inputOther":10,"output":5,"inputCacheRead":90,"inputCacheCreation":0},"usageScope":"turn","time":\#(nowMs - 30_000)}"#,
                 #"{"type":"usage.record","agentId":"agent-0","model":"OpenCode Go/deepseek-v4.1-flash","usage":{"inputOther":20,"output":7,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":\#(nowMs - 20_000)}"#,
                 #"{"type":"usage.record","agentId":"main","model":"agent-loop","usage":{"inputOther":3,"output":1,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":\#(nowMs - 10_000)}"#,
-                #"{"type":"llm.request","agentId":"main","provider":"openai","modelAlias":"OpenCode Go/deepseek-v4.1-flash","kind":"loop","turnStep":"0.1","time":\#(nowMs - 9_000)}"#,
+                #"{"type":"context.append_loop_event","agentId":"main","event":{"type":"step.begin","turnId":"0","step":4},"time":\#(nowMs - 9_000)}"#,
             ].joined(separator: "\n") + "\n"
             try? Data(content.utf8).write(to: file)
 
@@ -1191,14 +1217,14 @@ public enum SelfCheck {
             check("DailySource.snapshot", snap != nil)
             // 三条 usage.record 各带不同的 `model` 前缀（DeepSeek / OpenCode Go / 不匹配任何 Provider 的 agent-loop），
             // 全部并入同一份合计：input 10+20+3 = 33，output 5+7+1 = 13，cacheRead 90；
-            // 另有一条 llm.request，只贡献 1 次请求、不贡献任何 token。
+            // 另有一条 step.begin，只贡献 1 次请求、不贡献任何 token。
             check("DailySource.combined",
                   snap?.today == TokenStats(inputTokens: 33, outputTokens: 13, cacheReadTokens: 90, requestCount: 1))
             check("DailySource.combined.bothKnownPrefixesCounted", snap?.today.inputTokens == 10 + 20 + 3)
             check("DailySource.combined.unmatchedPrefixNotDropped", snap?.today.inputTokens != 10 + 20)
             check("DailySource.combined.notSinglePrefix", snap?.today.inputTokens != 20 + 3)
             check("DailySource.hitRate", abs((snap?.today.cacheHitRate ?? 0) - 90.0 / 123.0) < 1e-9)
-            // 请求次数不随 token 走：3 条 usage.record + 1 条 llm.request → 只有 1 次请求。
+            // 请求次数不随 token 走：3 条 usage.record + 1 条 step.begin → 只有 1 次请求。
             check("DailySource.requestCount", snap?.today.requestCount == 1)
             check("DailySource.requestCount.notUsageRecordCount", snap?.today.requestCount != 3)
         }
@@ -1421,22 +1447,21 @@ public enum SelfCheck {
             let items = StatusBarPresenter.renderMenu(inputs, now: now)
             let titles = items.map(\.title)
 
-            // 三个 provider 永远都在，顺序固定（= `ProviderID.supported`），header 只有 provider 名（不追加模型名）。
+            // 两个生效 provider 永远都在，顺序固定（= `ProviderID.supported`），header 只有 provider 名（不追加模型名）。
             let providerHeaders = ProviderID.supported.map(\.displayName)
             check("Menu.order.deepseekFirst", titles.first == "DeepSeek")
-            check("Menu.order.threeProviderSections",
-                  titles.filter { providerHeaders.contains($0) } == ["DeepSeek", "OpenCode Go", "Kimi"])
-            check("Menu.hasOpenCodeGo", titles.contains("OpenCode Go"))
+            check("Menu.order.twoProviderSections",
+                  titles.filter { providerHeaders.contains($0) } == ["DeepSeek", "Kimi"])
+            check("Menu.noDormantSection", !titles.contains("OpenCode Go"))
             check("Menu.hasKimi", titles.contains("Kimi"))
             check("Menu.headerOnlyProviderName",
-                  titles.firstIndex(of: "DeepSeek")! < titles.firstIndex(of: "OpenCode Go")!
-                      && titles.firstIndex(of: "OpenCode Go")! < titles.firstIndex(of: "Kimi")!)
+                  titles.firstIndex(of: "DeepSeek")! < titles.firstIndex(of: "Kimi")!)
             check("Menu.headerNoModel", !titles.contains { title in
                 providerHeaders.contains { title.hasPrefix("\($0) (") }
             })
             check("Menu.hasAllProvidersEvenIfNothingCaptured",
                   StatusBarPresenter.renderMenu(.init()).map(\.title).filter { providerHeaders.contains($0) }
-                  == ["DeepSeek", "OpenCode Go", "Kimi"])
+                  == ["DeepSeek", "Kimi"])
 
             // DeepSeek / Kimi 各一行余额（金额型），后者紧跟自己的 header。
             check("Menu.deepseek.balanceLine", titles.contains("余额 ¥65.92"))
@@ -1447,8 +1472,9 @@ public enum SelfCheck {
             } else {
                 check("Menu.kimi.sectionLocated", false)
             }
-            // OpenCode Go 三窗口进度条（顺序与标签固定）。
-            let bars = items.compactMap(\.usageBar)
+            // 休眠的 OpenCode Go 不再产生菜单 section（ADR-0010）；三窗口进度条的映射
+            // 仍由 `valueItems` 直接覆盖，恢复 provider 时不需要重写这部分断言。
+            let bars = StatusBarPresenter.valueItems(ocOK, now: now).compactMap(\.usageBar)
             check("Menu.opencode.barCount", bars.count == 3)
             check("Menu.opencode.labels", bars.map(\.leftText) == ["5h", "7d", "月度"])
             check("Menu.opencode.percentTexts", bars.map(\.percentText) == ["16%", "22%", "13%"])
@@ -1459,7 +1485,7 @@ public enum SelfCheck {
             ])
 
             // 用量：只有一份合并块，位于**全部** provider section 之后、「菜单栏显示」之前。
-            // 每行五段，第一段是请求次数（`llm.request` 行数）。
+            // 每行五段，第一段是请求次数（`step.begin` 行数）。
             let todayRow = "今日 · 请求 137 · ↑18.9K · ↓187 · ⚡145.0K · 🎯88%"
             let last5hRow = "近 5h · 请求 9 · ↑1.0K · ↓20 · ⚡4.0K · 🎯80%"
             check("Menu.usage.todayRow", titles.contains(todayRow))
@@ -1511,10 +1537,7 @@ public enum SelfCheck {
                 QuotaWindow(id: "monthly", label: "月度", usedPercent: 13, status: "rate-limited", resetsAt: now.addingTimeInterval(3600)),
             ]
             let limited = BalanceResult(provider: .opencodeGo, balance: 16, currency: .percent, usedPercent: 16, quotaWindows: limitedWindows)
-            let limitedBars = StatusBarPresenter.renderMenu(
-                .init(balances: [.opencodeGo: ProviderBalanceState(provider: .opencodeGo, result: limited)]),
-                now: now
-            ).compactMap(\.usageBar)
+            let limitedBars = StatusBarPresenter.valueItems(limited, now: now).compactMap(\.usageBar)
             check("Menu.limited.okFlags", limitedBars.map(\.isOK) == [true, true, false])
             check("Menu.limited.rawStatusVisible", limitedBars[2].resetText == "rate-limited · 1h0m 后重置")
             check("Menu.limited.okRowUnchanged", limitedBars[0].resetText == "1h0m 后重置")
@@ -1564,13 +1587,12 @@ public enum SelfCheck {
             let normalTrailings = ["4h17m 后重置", "5d3h 后重置", "26d 后重置"].map(UsageBarMenuItemView.trailingWidth(for:))
             check("Menu.bar.normalRowsShareFloor", normalTrailings.allSatisfy { $0 == UsageBarMenuItemView.minTrailingRegionWidth })
 
-            // 失败状态：每个 provider 自己的中文文案出现在自己的 section 里；三者互不牵连。
+            // 失败状态：每个 provider 自己的中文文案出现在自己的 section 里；两者互不牵连。
             let mixed = StatusBarPresenter.renderMenu(
                 .init(
-                    selectedProvider: .opencodeGo,
+                    selectedProvider: .kimi,
                     balances: [
                         .deepseek: ProviderBalanceState(provider: .deepseek, result: dsOK),
-                        .opencodeGo: ProviderBalanceState(provider: .opencodeGo, failure: .providerMissing),
                         .kimi: ProviderBalanceState(provider: .kimi, failure: .credentialSection("services.moonshot_search 的 api_key 为空")),
                     ],
                     daily: daily
@@ -1578,11 +1600,10 @@ public enum SelfCheck {
                 now: now
             )
             let mixedTitles = mixed.map(\.title)
-            check("Menu.independent.deepseekStillShown", mixedTitles.contains("余额 ¥65.92"))
-            check("Menu.independent.opencodeError", mixedTitles.contains("config 中未找到 provider \"OpenCode Go\""))
+            check("Menu.independent.otherStillShown", mixedTitles.contains("余额 ¥65.92"))
             check("Menu.independent.kimiError", mixedTitles.contains("services.moonshot_search 的 api_key 为空"))
-            check("Menu.independent.order", (mixedTitles.firstIndex(of: "config 中未找到 provider \"OpenCode Go\"") ?? 0)
-                > (mixedTitles.firstIndex(of: "DeepSeek") ?? 0))
+            check("Menu.independent.order", (mixedTitles.firstIndex(of: "services.moonshot_search 的 api_key 为空") ?? 0)
+                > (mixedTitles.firstIndex(of: "Kimi") ?? 0))
             // 失败的 provider 显示自己的原因，不会退化成「尚未采集」占位。
             check("Menu.independent.noPlaceholderWhenFailed",
                   mixedTitles.filter { $0 == "余额: ···" }.count == 0)
@@ -1612,17 +1633,18 @@ public enum SelfCheck {
                 return finish(&failures)
             }
             check("Menu.menuBarSelection.exists", true)
-            check("Menu.menuBarSelection.count", displaySub.count == 3)
-            check("Menu.menuBarSelection.titles", displaySub.map(\.title) == ["DeepSeek ✓", "OpenCode Go", "Kimi"])
+            check("Menu.menuBarSelection.count", displaySub.count == 2)
+            check("Menu.menuBarSelection.titles", displaySub.map(\.title) == ["DeepSeek ✓", "Kimi"])
             check("Menu.menuBarSelection.actions", displaySub.allSatisfy { $0.action == .selectProvider })
             check("Menu.menuBarSelection.represented",
-                  displaySub.map(\.representedProvider) == ["deepseek", "opencode-go", "kimi"])
-            let ocSelectedItems = StatusBarPresenter.renderMenu(.init(selectedProvider: .opencodeGo), now: now)
-            let ocDisplaySub = ocSelectedItems.first { $0.title == "菜单栏显示" }?.submenu
-            check("Menu.menuBarSelection.checkMoves", ocDisplaySub?.map(\.title) == ["DeepSeek", "OpenCode Go ✓", "Kimi"])
+                  displaySub.map(\.representedProvider) == ["deepseek", "kimi"])
+            // 休眠 provider 永不出现在子菜单，也永远拿不到 ✓。
+            let dormantSelectedItems = StatusBarPresenter.renderMenu(.init(selectedProvider: .opencodeGo), now: now)
+            let dormantDisplaySub = dormantSelectedItems.first { $0.title == "菜单栏显示" }?.submenu
+            check("Menu.menuBarSelection.dormantNeverListed", dormantDisplaySub?.map(\.title) == ["DeepSeek", "Kimi"])
             let kimiSelectedItems = StatusBarPresenter.renderMenu(.init(selectedProvider: .kimi), now: now)
             let kimiDisplaySub = kimiSelectedItems.first { $0.title == "菜单栏显示" }?.submenu
-            check("Menu.menuBarSelection.checkMovesToKimi", kimiDisplaySub?.map(\.title) == ["DeepSeek", "OpenCode Go", "Kimi ✓"])
+            check("Menu.menuBarSelection.checkMovesToKimi", kimiDisplaySub?.map(\.title) == ["DeepSeek", "Kimi ✓"])
 
             // Caffeinate 子菜单 + 倒计时行 + 取消守护。
             let caffSub = items.first { $0.title == "阻止系统休眠" }?.submenu
@@ -1657,14 +1679,14 @@ public enum SelfCheck {
                 capturedAt: now
             )
             let dsOK = BalanceResult(provider: .deepseek, balance: 65.92, currency: .cny, isAvailable: true)
-            let ocOK = BalanceResult(provider: .opencodeGo, balance: 16, currency: .percent, usedPercent: 16)
+            let kimiOK = BalanceResult(provider: .kimi, balance: 49.58894, currency: .cny, isAvailable: true)
 
             let dsCapture = ProviderCapture(result: dsOK)
-            let ocCapture = ProviderCapture(result: ocOK)
+            let kimiCapture = ProviderCapture(result: kimiOK)
 
             let balanceSource = FakeBalanceSource(next: BalanceCapture(
-                perProvider: [.deepseek: dsCapture, .opencodeGo: ocCapture],
-                configMissing: false, defaultModel: "OpenCode Go/x", capturedAt: now
+                perProvider: [.deepseek: dsCapture, .kimi: kimiCapture],
+                configMissing: false, defaultModel: "Kimi/k3", capturedAt: now
             ))
             let dailySource = FakeDailyUsageSource(next: (daily, nil))
             let state = AppState()
@@ -1674,7 +1696,7 @@ public enum SelfCheck {
             check("Refresh.tick.balanceCalls", balanceSource.callCount == 1)
             check("Refresh.tick.dailyCalls", dailySource.callCount == 1)
             check("Refresh.tick.deepseek", state.balance(for: .deepseek).result?.balance == 65.92)
-            check("Refresh.tick.opencode", state.balance(for: .opencodeGo).result?.usedPercent == 16)
+            check("Refresh.tick.kimi", state.balance(for: .kimi).result?.balance == 49.58894)
             check("Refresh.tick.daily", state.daily?.today.inputTokens == 100)
             check("Refresh.tick.noConfigMissing", state.configMissing == false)
             check("Refresh.tick.selectedProviderUnchanged", state.selectedProvider == .deepseek)
@@ -1684,7 +1706,7 @@ public enum SelfCheck {
             sync { await rc.tick() }
             check("Refresh.configMissing.flag", state.configMissing == true)
             check("Refresh.configMissing.deepseek", state.balance(for: .deepseek).failure == .configUnreadable("未找到 /x/config.toml"))
-            check("Refresh.configMissing.opencode", state.balance(for: .opencodeGo).failure?.statusBarTag == "配置")
+            check("Refresh.configMissing.kimi", state.balance(for: .kimi).failure?.statusBarTag == "配置")
             check("Refresh.configMissing.noAutoSwitch", state.selectedProvider == .deepseek)
             // 旧值被保留并标 stale（配置读不到时仍能看到最后一次的钱，但文案说明是旧值）。
             check("Refresh.configMissing.keepsStaleValue", state.balance(for: .deepseek).result?.balance == 65.92
@@ -1694,14 +1716,14 @@ public enum SelfCheck {
             balanceSource.next = BalanceCapture(
                 perProvider: [
                     .deepseek: ProviderCapture(failure: .credentialEmpty),
-                    .opencodeGo: ProviderCapture(result: BalanceResult(provider: .opencodeGo, balance: 22, currency: .percent, usedPercent: 22)),
+                    .kimi: ProviderCapture(result: BalanceResult(provider: .kimi, balance: 42, currency: .cny)),
                 ],
                 configMissing: false, defaultModel: nil, capturedAt: now
             )
             sync { await rc.tick() }
             check("Refresh.independent.deepseekFailure", state.balance(for: .deepseek).failure == .credentialEmpty)
-            check("Refresh.independent.opencodeUpdated", state.balance(for: .opencodeGo).result?.usedPercent == 22)
-            check("Refresh.independent.opencodeNoFailure", state.balance(for: .opencodeGo).failure == nil)
+            check("Refresh.independent.kimiUpdated", state.balance(for: .kimi).result?.balance == 42)
+            check("Refresh.independent.kimiNoFailure", state.balance(for: .kimi).failure == nil)
             check("Refresh.independent.configRecovered", state.configMissing == false)
 
             // 缺键 = providerMissing（防御性）。
@@ -1710,23 +1732,23 @@ public enum SelfCheck {
                 configMissing: false, defaultModel: nil, capturedAt: now
             )
             sync { await rc.tick() }
-            check("Refresh.missingKey.opencode", state.balance(for: .opencodeGo).failure == .providerMissing)
+            check("Refresh.missingKey.kimi", state.balance(for: .kimi).failure == .providerMissing)
             check("Refresh.missingKey.deepseek", state.balance(for: .deepseek).result?.balance == 65.92)
 
             // 用户切换菜单栏 provider：tick 不会把它改回去。
-            state.setSelectedProvider(.opencodeGo)
+            state.setSelectedProvider(.kimi)
             balanceSource.next = BalanceCapture(
-                perProvider: [.deepseek: dsCapture, .opencodeGo: ProviderCapture(failure: .fetch("请求超时 (10 秒)"))],
+                perProvider: [.deepseek: dsCapture, .kimi: ProviderCapture(failure: .fetch("请求超时 (10 秒)"))],
                 configMissing: false, defaultModel: nil, capturedAt: now
             )
             sync { await rc.tick() }
-            check("Refresh.userChoicePreserved", state.selectedProvider == .opencodeGo)
-            check("Refresh.userChoice.stale", state.balance(for: .opencodeGo).isStale)
+            check("Refresh.userChoicePreserved", state.selectedProvider == .kimi)
+            check("Refresh.userChoice.stale", state.balance(for: .kimi).isStale)
             check("Refresh.userChoice.otherUnaffected", state.balance(for: .deepseek).result?.balance == 65.92)
 
             // reader / aggregator 异常走 lastDailyError，不影响余额。
             dailySource.next = (nil, .scanError("扫描失败"))
-            balanceSource.next = BalanceCapture(perProvider: [.deepseek: dsCapture, .opencodeGo: ocCapture],
+            balanceSource.next = BalanceCapture(perProvider: [.deepseek: dsCapture, .kimi: kimiCapture],
                                                 configMissing: false, defaultModel: nil, capturedAt: now)
             sync { await rc.tick() }
             check("Refresh.dailyError", state.lastDailyError == "扫描失败")
@@ -2653,6 +2675,28 @@ public enum SelfCheck {
                       && SettingsStore.clampRetentionDays(-1) == 0 && SettingsStore.clampRetentionDays(999) == 365)
             check("Settings.cleanup.ranges",
                   SettingsStore.cleanupKeepCountRange == 0...20 && SettingsStore.cleanupRetentionDaysRange == 0...365)
+
+            // 存量菜单栏 provider 值：休眠 / 未知 → 一次性自愈写回，键从未存在时不写盘。
+            defaults.set("opencode-go", forKey: SettingsStore.providerKey)
+            let healedDormant = SettingsStore(defaults: defaults, fallbackProvider: .kimi)
+            check("Settings.provider.dormantFallsBack", healedDormant.selectedProvider == .kimi)
+            check("Settings.provider.dormantHealsStored",
+                  defaults.string(forKey: SettingsStore.providerKey) == "kimi")
+
+            defaults.set("zenmux", forKey: SettingsStore.providerKey)
+            let healedUnknown = SettingsStore(defaults: defaults, fallbackProvider: .deepseek)
+            check("Settings.provider.unknownFallsBack", healedUnknown.selectedProvider == .deepseek)
+            check("Settings.provider.unknownHealsStored",
+                  defaults.string(forKey: SettingsStore.providerKey) == "deepseek")
+
+            defaults.set("deepseek", forKey: SettingsStore.providerKey)
+            check("Settings.provider.validRestored",
+                  SettingsStore(defaults: defaults).selectedProvider == .deepseek)
+
+            defaults.removeObject(forKey: SettingsStore.providerKey)
+            _ = SettingsStore(defaults: defaults)
+            check("Settings.provider.noWriteWhenAbsent",
+                  defaults.object(forKey: SettingsStore.providerKey) == nil)
         }
 
         // MARK: - LogoCatalog / 落地资源

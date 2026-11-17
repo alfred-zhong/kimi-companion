@@ -4,13 +4,13 @@
 
 macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 kimi-code desktop 所用第三方 provider 的余额 / 配额，加一份**合并的** token 用量与模型请求次数（不区分 provider / model）。每 30 / 60 / 120s 刷新（默认 60s）。抓取失败永不空白：菜单栏显示 `?kimi` / `⚠︎<短标签>`，菜单给出可照抄去改配置的中文说明。
 
-- **Provider**：`DeepSeek`（账户余额 CNY）、`OpenCode Go`（5h / 7d / 月度三窗口配额，已用百分比）、`Kimi`（Moonshot 开放平台可用余额 CNY，单行 `余额 ¥49.59`，`available_balance ≤ 0` 时该行追加 ` ⚠`）。
+- **Provider**：当前生效两个 —— `DeepSeek`（账户余额 CNY）与 `Kimi`（Moonshot 开放平台可用余额 CNY，单行 `余额 ¥49.59`，`available_balance ≤ 0` 时该行追加 ` ⚠`）。`OpenCode Go`（5h / 7d / 月度三窗口配额）已默认停用但实现全部保留（ADR-0010）：不进菜单、不抓取、不参与 `default_model` 前缀匹配；恢复 = 把 `.opencodeGo` 加回 `ProviderID.supported`。
 - 有意不支持 first-party `managed:kimi-code` 账号（`api_key` 恒空、走 OAuth，本地 `oauth/usage` 端点只覆盖该账号）。
 
 ## 硬性不变量
 
 - **凭据**：只读 `~/.kimi-code/config.toml` 的内联 `api_key`（ADR-0002）。通用来源 `[providers.<段名>]`；`[services.moonshot_search]` / `[services.moonshot_fetch]` 是**只服务 `Kimi` 的例外**（ADR-0008），不得扩展成通用凭据通道。不写回该文件、不读 Keychain、不读 `api_key_env`（不 `getenv`）、不碰 kimi-code 本地 HTTP server（`server/instances/*.json`、`server.token`、`mcp.json`）。
-- **用量是合并的一份**（ADR-0006）：`usage.record`（token）与 `llm.request`（请求次数）无条件求和，不按 provider / model 分组，`model` / `modelAlias` / `provider` 字段完全不读。菜单里 provider section 只放余额 / 配额；用量块（`今日` / `近 5h`）独立成段，放在所有 section 之后。请求次数是**尝试**口径（含重试与被中断的尝试），因此大于「拿到 usage 的调用数」。
+- **用量是合并的一份**（ADR-0006）：`usage.record`（token）与 `step.begin`（请求次数）无条件求和，不按 provider / model 分组，`model` / `modelAlias` / `provider` 字段完全不读。菜单里 provider section 只放余额 / 配额；用量块（`今日` / `近 5h`）独立成段，放在所有 section 之后。请求次数是**发起**口径（含被中断的尝试），因此大于或等于「拿到 usage 的调用数」。
 - **无磁盘缓存**：每 tick 实时查 provider + 增量读会话日志，Read Cursor 只在进程内（ADR-0004）。不写 `~/Library/Caches/<bundle-id>/`。运行期持久化只有 UserDefaults（刷新间隔 / 选中 provider / 清理策略）；清理动作的受控写盘是唯一例外（`workspaces.json` / `session_index.jsonl` / `file-history`，ADR-0007 / 0009）。
 - **菜单栏 provider 是显式选择**（ADR-0005）：`default_model` 推导只在首启用一次，此后用户选择优先，provider 失败绝不自动切换 `selectedProvider`。
 - **不 shell-out 任何上游 CLI**。新增 provider 只需枚举 case + `BalanceProvider.fetch`，外加在 `LiveBalanceSource.captureOne` 的穷尽 `switch` 里声明凭据来源（漏了会编译失败）。
@@ -68,7 +68,7 @@ make clean   # rm -rf build .build
 
 ### 错误处理
 - `HTTPError`：`timeout | unauthorized(status:) | rateLimited | server(status:) | invalidResponse | missingCredential`；非 2xx 在 `URLSessionHTTPClient` 里就分类。
-- 各 provider 的 `decode` 宁可 `throw .invalidResponse` 也不展示凭空的 `¥0.00`：DeepSeek 的 `balance_infos` 缺失 / 为空 / 不可解析 → 报错；OpenCode Go 三窗口 all-or-nothing；`Kimi` 的 `code != 0` / `status != true` / 三个余额字段（`available_balance` / `voucher_balance` / `cash_balance`）任一不可解析 → 报错（`jsonDouble` 兼容字符串与数字两种数值形状）。
+- 各 provider 的 `decode` 宁可 `throw .invalidResponse` 也不展示凭空的 `¥0.00`：DeepSeek 的 `balance_infos` 缺失 / 为空 / 不可解析 → 报错；休眠的 OpenCode Go 三窗口 all-or-nothing（实现与断言保留）；`Kimi` 的 `code != 0` / `status != true` / 三个余额字段（`available_balance` / `voucher_balance` / `cash_balance`）任一不可解析 → 报错（`jsonDouble` 兼容字符串与数字两种数值形状）。
 - 单 provider 失败被 `LiveBalanceSource.captureOne` 收敛成 `ProviderCapture(failure:)`，**不 throw 出 Source**：一个 provider 的失败绝不短路另一个。
 - `LiveBalanceSource.humanReadable(_:)` 把 `HTTPError` 映射成中文文案（`请求超时 (10 秒)` / `鉴权失败 (401)` / `请求过快 (429)` / `服务异常 (5xx)` / `响应解析失败` / `凭据缺失`），缺省回退 `localizedDescription`。
 - `ProviderFailure` 是类型化枚举而非裸字符串：菜单栏短标签（`⚠︎配置` / `⚠︎凭据`）与菜单长文案都由它纯函数派生。`.credentialSection(reason)` 目前只有 `Kimi` 走到（段不存在 / `api_key` 为空 / 只用 `api_key_env`），中文 reason 由 `KimiProvider.credentialPreflight` 拼好，短标签仍是 `⚠︎凭据`。
@@ -81,7 +81,7 @@ make clean   # rm -rf build .build
 
 ### 命名 / 模板
 - 值类型优先（`struct BalanceResult` / `TokenStats` / `HourBucket` / `DailyUsageSnapshot`），行为 / 纯函数走 `enum` 单例（`BalanceRegistry` / `SelfCheck` / `CompactFormatter` / `BalanceFormatter` / `HourlyAggregator` / `StatusBarPresenter` / `LogoCatalog` / `MenuBarSelection`）。
-- `ProviderID.supported`（`[.deepseek, .opencodeGo, .kimi]`，顺序即菜单 section 顺序）是「菜单里永远都在的 provider」的唯一来源；`allCases` 含 `.unknown`，只作 `default_model` 前缀未匹配的哨兵与 logo / 查表缺省分支。`Kimi` 的 `configSectionName`（`"Kimi"`）只承担展示名与前缀匹配，**不代表存在 `[providers.Kimi]` 段**（凭据走 `[services.*]`）。
+- `ProviderID.supported`（`[.deepseek, .kimi]`，顺序即菜单 section 顺序）是「菜单里永远都在的 provider」的唯一来源；抓取循环、菜单 section、「菜单栏显示」子菜单、`default_model` 前缀解析都只读它，因此休眠 provider（`.opencodeGo`）不在这里就自动全面停用（ADR-0010，`allCases` 仍含它）。`allCases` 含 `.unknown`，只作 `default_model` 前缀未匹配的哨兵与 logo / 查表缺省分支。`Kimi` 的 `configSectionName`（`"Kimi"`）只承担展示名与前缀匹配，**不代表存在 `[providers.Kimi]` 段**（凭据走 `[services.*]`）。
 
 ### 文案 / 标题
 - 错误文案集中在 `ProviderFailure.menuText(provider:)` + `LiveBalanceSource.humanReadable(_:)`，新增错误显示分支优先复用。
@@ -93,8 +93,8 @@ make clean   # rm -rf build .build
 ### 用量桶 / 进度条不变量
 - 12 个 `HourBucket`，索引 0 最旧、末位最新，区间左开右闭 `(startMs, endMs]`；末桶永远是完整一小时（`endMs = nowMs`）。`DailyUsageSnapshot.last5h` = `hourly.suffix(5)` 的并集 = `[now-5h, now]`。
 - 事件 `tsMs < todayStartMs` 不算「今日」但**仍可**进小时桶（窗口可跨零点）；`hoursAgo ∉ [0, 12)` 才丢。去重键 `"\(relPath):\(lineOffset)"`，不要改成其它样式。
-- 请求次数与 token 走**同一套边界、同一个桶轴**（同一个 `TokenStats` 上求和），但时间戳来源不同：`llm.request.time` 是发起时刻、`usage.record.time` 是返回时刻。因此一次跨零点 / 跨桶边界的调用会把请求记在前一个窗口、token 记在后一个窗口（偏差量级 = 单次调用时长）。不要为此引入配对逻辑。
-- 请求次数是**尝试**口径：`llm.request` 行数，含重试与被中断的尝试，也含 `kind=compaction` 的压缩调用。要改成计费口径（= `usage.record` 行数）只需把 `WireLineParser` 里的 `requestCount: 1` 从 `llm.request` 分支挪到 `usage.record` 分支。
+- 请求次数与 token 走**同一套边界、同一个桶轴**（同一个 `TokenStats` 上求和），但时间戳来源不同：`step.begin.time` 是发起时刻、`usage.record.time` 是返回时刻。因此一次跨零点 / 跨桶边界的调用会把请求记在前一个窗口、token 记在后一个窗口（偏差量级 = 单次调用时长）。不要为此引入配对逻辑。
+- 请求次数取 `context.append_loop_event` 的 `event.type == "step.begin"`，**不取** `llm.request`：Kimi Code 桌面版不写 `llm.request`（2026-11-13 实测当日 0 行 / 498 行 `usage.record`），只有 CLI 写；`step.begin` 两种客户端都写，是唯一客户端无关的「发起一次模型调用」标记。该口径含被中断的尝试（只有 `step.begin`、没有 `usage.record`），但同一 step 内的重试（`turn.step.retrying`）不新开 `step.begin`，这部分尝试不计入。要改成计费口径（= `usage.record` 行数）只需把 `WireLineParser` 里的 `requestCount: 1` 挪到 `usage.record` 分支。
 - 段色：`isOK == false` → 强制红；否则 `<70` 绿 / `70–90` 黄 / `>90` 红。
 - 进度条行宽：右区（状态串 / 重置倒计时）按本行文本实测预留（`trailingWidth(for:)`，无文本 0，下限 `minTrailingRegionWidth` 84pt），条长下限 `minBarWidth` 150pt，右区文本距视图右缘 `trailingRightMargin` 20pt；视图宽度取 `minimumWidth(hasLeftLabel:trailingWidth:)`，整行铺满、三窗口正常形态条长一致。**不要**退回「固定预留宽度 + 240pt 底宽」的写法。
 
@@ -123,7 +123,7 @@ make clean   # rm -rf build .build
 | `Refresh/LiveSources.swift` | 生产 `LiveBalanceSource` / `LiveDailyUsageSource` + `humanReadable(_:)` |
 | `Refresh/SnapshotError.swift` | `SnapshotError` + `BalanceCapture` / `BalanceSource` / `BalanceRefreshOutcome` / `DailyUsageSource` |
 | `Refresh/Fakes.swift` | `FakeBalanceSource` / `FakeDailyUsageSource`（SelfCheck 用） |
-| `Usage/WireLineParser.swift` | 单行 `usage.record`（token 四项）/ `llm.request`（`requestCount = 1`）→ `UsageEvent`；只取 `time` 与各自的事实字段，不读 `model` / `modelAlias` / `provider` |
+| `Usage/WireLineParser.swift` | 单行 `usage.record`（token 四项）/ `context.append_loop_event` 的 `step.begin`（`requestCount = 1`）→ `UsageEvent`；只取 `time` 与各自的事实字段，不读 `model` / `modelAlias` / `provider`；`llm.request` 不再计入 |
 | `Usage/WireLogReader.swift` | 增量读取 + 进程内 Read Cursor + 保留窗口（ADR-0004）；对两种事件行一视同仁 |
 | `Usage/HourlyAggregator.swift` | 12 滑动小时桶 + 合并 `today`（token 与请求次数同轴求和）；不按 provider 分组 |
 | `Usage/Formatting.swift` | `CompactFormatter.format(Int)` K/M/B + `999_500 → "1.0M"` |
@@ -136,7 +136,7 @@ make clean   # rm -rf build .build
 | `UI/CleanupAlertPresenter.swift` | `NSAlert` 接线（预览 / 结果 / 固定 220pt 可滚动等宽详情区）；LSUIElement 下弹窗前自己抢焦点（`positionWindow` 先 `layout()` + `center()` 摆位，否则窗口停在 alert 默认 frame 的屏幕左上） |
 | `UI/SettingsWindow.swift` | `SettingsStore`（`@Published` × 镜像 UserDefaults）+ `NSHostingController<SettingsView>`（刷新间隔 + 清理策略两项 `Stepper`；Keep Count 范围 `0…20`，`0` 显示「不保留」） |
 | `Brand/LogoCatalog.swift` | `ProviderID` → `NSImage` 查表 + template 标记；未知 provider 返回 nil |
-| `Resources/Info.plist` | **`LSUIElement=true`**、`CFBundleIdentifier=com.alfred-zhong.kimi-companion`、`CFBundleIconFile=AppIcon`、`LSMinimumSystemVersion=13.0`、版本 `0.4.2`（build `7`，与 `META` 同步） |
+| `Resources/Info.plist` | **`LSUIElement=true`**、`CFBundleIdentifier=com.alfred-zhong.kimi-companion`、`CFBundleIconFile=AppIcon`、`LSMinimumSystemVersion=13.0`、版本 `0.5.0`（build `9`，与 `META` 同步） |
 | `Resources/provider_*.png` | 菜单栏 logo（`@2x` / `@3x`，无 `.color.png` 兜底） |
 | `Resources/AppIcon.icns` | app 图标（`CFBundleIconFile` 指向；Finder / `NSAlert` 用）。由 `Tools/make-appicon.swift` 生成，勿手改 |
 | `Tools/make-appicon.swift` | 图标生成脚本（不在 SwiftPM target 里，`swift Tools/make-appicon.swift` 直接跑；改设计改这里再重新生成） |
@@ -151,7 +151,7 @@ make clean   # rm -rf build .build
 - **SwiftUI 代码不得依赖宏展开的 API**（`@State` / `@StateObject` / `@Environment` / `@Bindable`）：macOS 27 SDK 起它们是外部宏，插件 `libSwiftUIMacros.dylib` 只随 Xcode 提供，CLT 下编译会以 `plugin for module 'SwiftUIMacros' not found` 失败。视图内可变状态一律用 `ObservableObject` + `@ObservedObject`。
 - 包管理 SwiftPM；唯一外部依赖 `TOMLKit`（`from: 0.6.0`）。不新增 Conan / CocoaPods / Carthage。
 - 签发只做本机 ad-hoc（`codesign --force --deep --sign -`），不做 Developer ID 公证。不新增 `LaunchAgent` plist，app 不自启。
-- provider 请求走 `URLSession.shared`，未配 `NSAppTransportSecurity` 例外；新增端点必须 HTTPS 且经 `normalizeBaseURL`（去尾斜杠 + 强制 https + 回退官方默认）。`Kimi` 的端点是写死的 https 国内站 `api.moonshot.cn`，不经 `normalizeBaseURL`。`OpenCode Go` 的 `base_url` 可能是 **OpenAI 兼容地址**（末尾 `…/inference/go/openai/v1`，kimi-code 就是这个写法）：`/usage` 挂在 `…/inference/go/v1/usage`，拼路径前必须摘掉 `openai` 段（`OpenCodeGoProvider.usageBaseURL`），否则 404。
+- provider 请求走 `URLSession.shared`，未配 `NSAppTransportSecurity` 例外；新增端点必须 HTTPS 且经 `normalizeBaseURL`（去尾斜杠 + 强制 https + 回退官方默认）。`Kimi` 的端点是写死的 https 国内站 `api.moonshot.cn`，不经 `normalizeBaseURL`。休眠的 `OpenCode Go` 的 `base_url` 可能是 **OpenAI 兼容地址**（末尾 `…/inference/go/openai/v1`，kimi-code 就是这个写法）：`/usage` 挂在 `…/inference/go/v1/usage`，拼路径前必须摘掉 `openai` 段（`OpenCodeGoProvider.usageBaseURL`），否则 404；恢复该 provider 时这条仍然适用。
 
 ## 测试
 

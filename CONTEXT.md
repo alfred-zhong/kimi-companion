@@ -13,7 +13,7 @@ _Avoid_: 状态栏 app、系统托盘 app、后台服务
 _Avoid_: 状态栏图标、托盘图标
 
 **Provider**:
-kimi-code 经 `config.toml` 的 `[providers.*]` 段配置的第三方模型服务商或订阅网关；每个 Provider 暴露一个查询余额 / 配额的 HTTPS 端点与一份凭据。本 app 支持三个：DeepSeek（账户余额）、OpenCode Go（订阅配额）与 Kimi（开放平台可用余额）。
+kimi-code 经 `config.toml` 的 `[providers.*]` 段配置的第三方模型服务商或订阅网关；每个 Provider 暴露一个查询余额 / 配额的 HTTPS 端点与一份凭据。当前生效两个：DeepSeek（账户余额）与 Kimi（开放平台可用余额）；OpenCode Go（订阅配额）默认停用但实现全部保留（决策见 `docs/adr/0010-disable-opencode-go.md`）。
 _Avoid_: 服务商、模型提供方、平台
 
 **Provider Name**:
@@ -29,27 +29,27 @@ Kimi 开放平台账户的可用金额（CNY），等于现金余额加代金券
 _Avoid_: 余额、账户余额、订阅额度
 
 **Quota Window**:
-OpenCode Go 订阅的一个额度窗口；每窗口由已用百分比、服务端状态串与重置时刻组成。
+休眠的 OpenCode Go 订阅的一个额度窗口；每窗口由已用百分比、服务端状态串与重置时刻组成。
 _Avoid_: 配额、额度段、时段
 
 **Rolling Window**:
-OpenCode Go 的 5 小时滚动窗口；也是菜单栏主窗口——状态栏展示的百分比来自它。
+休眠的 OpenCode Go 的 5 小时滚动窗口；曾是菜单栏主窗口，停用后不再展示。
 _Avoid_: 短窗、会话窗、主窗口
 
 **Weekly Window**:
-OpenCode Go 的 7 天窗口。
+休眠的 OpenCode Go 的 7 天窗口。
 _Avoid_: 周窗、周配额
 
 **Monthly Window**:
-OpenCode Go 的月度窗口，按订阅周年重置。
+休眠的 OpenCode Go 的月度窗口，按订阅周年重置。
 _Avoid_: 月窗、自然月窗口
 
 **Used Percent**:
-窗口已用百分比（0–100），服务端原样返回，展示层不换算、不取反。
+窗口已用百分比（0–100），服务端原样返回，展示层不换算、不取反；仅休眠的 OpenCode Go 使用。
 _Avoid_: 使用率、占用率、剩余百分比
 
 **Reset Time**:
-窗口下次重置的时刻；界面展示为剩余时长倒计时（≥24h 用 `XdYh`）。
+窗口下次重置的时刻；界面展示为剩余时长倒计时（≥24h 用 `XdYh`），当前只用于休眠 Provider 的进度条行。
 _Avoid_: 过期时间、刷新时间、周期
 
 **Snapshot**:
@@ -137,7 +137,7 @@ _Avoid_: 单个字段更新、刷新结果
 _Avoid_: 标题、文案
 
 **Usage Bar**:
-percent 类型 Provider 在菜单里的用量行：窗口标签 + 轨道 + 紧贴条尾的已用百分比 + 重置倒计时；窗口状态非正常时轨道强制转红。
+百分比型 Provider 的用量行实现：窗口标签 + 轨道 + 紧贴条尾的已用百分比 + 重置倒计时；窗口状态非正常时轨道强制转红。当前没有生效的百分比型 Provider，菜单不渲染它；代码与断言保留，供休眠的 OpenCode Go 恢复后使用。
 _Avoid_: 进度条、柱图
 
 **Chat Session**:

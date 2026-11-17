@@ -47,8 +47,14 @@ public final class SettingsStore: ObservableObject, @unchecked Sendable {
         }
         self.intervalSeconds = restored.interval
 
-        let stored = defaults.string(forKey: Self.providerKey).flatMap(ProviderID.init(rawValue:))
-        self.selectedProvider = stored.flatMap { ProviderID.supported.contains($0) ? $0 : nil } ?? fallbackProvider
+        let storedRaw = defaults.string(forKey: Self.providerKey)
+        let stored = storedRaw.flatMap(ProviderID.init(rawValue:))
+        let resolved = stored.flatMap { ProviderID.supported.contains($0) ? $0 : nil } ?? fallbackProvider
+        // 存量脏值（休眠 provider / 未知 rawValue）落回可用值并写回自愈；键不存在时不凭空创建。
+        if let storedRaw, storedRaw != resolved.rawValue {
+            defaults.set(resolved.rawValue, forKey: Self.providerKey)
+        }
+        self.selectedProvider = resolved
 
         // `integer(forKey:)` 对「从未设置」与「显式存 0」返回同一个 0，而 0 是保留天数的合法值
         // （不限天数）—— 因此必须区分「键不存在」与「值是 0」。

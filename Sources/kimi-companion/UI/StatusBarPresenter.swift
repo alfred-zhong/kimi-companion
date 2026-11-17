@@ -232,18 +232,13 @@ public enum StatusBarPresenter {
     /// DeepSeek
     ///   余额 ¥65.92 [⚠]
     /// ──────
-    /// OpenCode Go
-    ///   [5h ███ 16% 4h17m 后重置]
-    ///   [7d ███ 22% 5d3h 后重置]
-    ///   [月度 ██ 13% 26d 后重置]
-    /// ──────
     /// Kimi
     ///   余额 ¥49.59 [⚠]
     /// ──────
     /// 今日 · 请求 … · ↑… · ↓… · ⚡… · 🎯…%
     /// 近 5h · 请求 … · …
     /// ──────
-    /// 菜单栏显示 ▸ (DeepSeek / OpenCode Go / Kimi，选中打 ✓)
+    /// 菜单栏显示 ▸ (DeepSeek / Kimi，选中打 ✓)
     /// ──────
     /// 阻止系统休眠 ▸ (30 / 60 / 120 分钟) + 倒计时行 + 取消守护
     /// ──────
@@ -253,6 +248,8 @@ public enum StatusBarPresenter {
     /// ──────
     /// 退出
     /// ```
+    /// 休眠的 OpenCode Go 不产生 section / 子菜单项（ADR-0010）；它的三窗口进度条仍由
+    /// `valueItems` 渲染，供 `SelfCheck` 与将来恢复时使用。
     public static func renderMenu(_ inputs: Inputs, now: Date = Date()) -> [MenuItemSpec] {
         var items: [MenuItemSpec] = []
 
@@ -333,7 +330,10 @@ public enum StatusBarPresenter {
     }
 
     /// 余额 / 配额的数值行。
-    private static func valueItems(_ result: BalanceResult, now: Date) -> [MenuItemSpec] {
+    ///
+    /// `internal`（而非 `private`）只为 `SelfCheck` 继续覆盖休眠的 OpenCode Go 百分比路径
+    /// （ADR-0010）：该 provider 已不进菜单，`providerSection` 不再实际渲染 percent 结果。
+    static func valueItems(_ result: BalanceResult, now: Date) -> [MenuItemSpec] {
         switch result.currency {
         case .cny, .usd:
             // `is_available: false` 时金额仍是真数据，但要能看出当前不可用。
