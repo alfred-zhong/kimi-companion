@@ -1548,11 +1548,47 @@ public enum SelfCheck {
             let items = StatusBarPresenter.renderMenu(inputs, now: now)
             let titles = items.map(\.title)
 
-            // 三个 provider 永远都在，顺序固定（= `ProviderID.supported`），header 只有 provider 名（不追加模型名）。
+            // 三个 provider 永远都在；section 顺序 = 选中者置顶 + 其余保持 `ProviderID.supported` 相对顺序。
+            // header 只有 provider 名（不追加模型名）。
             let providerHeaders = ProviderID.supported.map(\.displayName)
             check("Menu.order.deepseekFirst", titles.first == "DeepSeek")
-            check("Menu.order.threeProviderSections",
-                  titles.filter { providerHeaders.contains($0) } == ["DeepSeek", "OpenCode Go", "Kimi"])
+            check("Menu.order.selectedFirst",
+                  titles.filter { providerHeaders.contains($0) }
+                  == StatusBarPresenter.orderedProviders(selected: .deepseek).map(\.displayName))
+            check("Menu.order.deepseekSelected",
+                  StatusBarPresenter.orderedProviders(selected: .deepseek) == [.deepseek, .opencodeGo, .kimi])
+            check("Menu.order.opencodeSelected",
+                  StatusBarPresenter.orderedProviders(selected: .opencodeGo) == [.opencodeGo, .deepseek, .kimi])
+            check("Menu.order.kimiSelected",
+                  StatusBarPresenter.orderedProviders(selected: .kimi) == [.kimi, .deepseek, .opencodeGo])
+            // 选中值不在 `supported` 里（理论上自愈后不会出现）时退化为原序，不丢 section。
+            check("Menu.order.unknownSelectionFallsBack",
+                  StatusBarPresenter.orderedProviders(selected: .unknown) == [.deepseek, .opencodeGo, .kimi])
+            // 渲染层同样跟着置顶：选 OpenCode Go 时它的 header 就是菜单第一项。
+            check("Menu.order.opencodeSectionAtTop",
+                  StatusBarPresenter.renderMenu(.init(selectedProvider: .opencodeGo), now: now)
+                      .map(\.title).first == "OpenCode Go")
+            check("Menu.order.kimiSectionAtTop",
+                  StatusBarPresenter.renderMenu(.init(selectedProvider: .kimi), now: now)
+                      .map(\.title).first == "Kimi")
+            check("Menu.order.othersKeepRelativeOrder",
+                  StatusBarPresenter.renderMenu(.init(selectedProvider: .opencodeGo), now: now)
+                      .map(\.title).filter { providerHeaders.contains($0) }
+                  == ["OpenCode Go", "DeepSeek", "Kimi"]
+                      && StatusBarPresenter.renderMenu(.init(selectedProvider: .kimi), now: now)
+                      .map(\.title).filter { providerHeaders.contains($0) }
+                  == ["Kimi", "DeepSeek", "OpenCode Go"])
+            // 置顶只换位置：不分隔线打头，也没有丢 section。
+            check("Menu.order.leadingSeparatorAbsent",
+                  ![.deepseek, .opencodeGo, .kimi].contains { pid in
+                      StatusBarPresenter.renderMenu(.init(selectedProvider: pid), now: now)
+                          .first.map { $0.title.isEmpty } ?? true
+                  })
+            check("Menu.order.sectionCountStable",
+                  [.deepseek, .opencodeGo, .kimi].allSatisfy { pid in
+                      StatusBarPresenter.renderMenu(.init(selectedProvider: pid), now: now)
+                          .map(\.title).filter { providerHeaders.contains($0) }.count == 3
+                  })
             check("Menu.hasOpencodeSection", titles.contains("OpenCode Go"))
             check("Menu.hasKimi", titles.contains("Kimi"))
             check("Menu.headerOnlyProviderName",

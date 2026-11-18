@@ -105,8 +105,12 @@ _Avoid_: 用量统计、token 数
 _Avoid_: 命中率、缓存率
 
 **Selected Provider**:
-菜单栏当前展示哪个 Provider 的值；由用户从下拉菜单显式选择并持久化，采集失败时不自动切换。
+菜单栏当前展示哪个 Provider 的值；由用户从下拉菜单显式选择并持久化，采集失败时不自动切换。它的 Provider Section 在下拉菜单里置顶（决策见 `docs/adr/0012-selected-provider-first-in-menu.md`）。
 _Avoid_: 当前 Provider、默认 Provider、活跃 Provider
+
+**Provider Section**:
+下拉菜单里单个 Provider 的一段：header（只有 Provider 名）+ 余额行 / 配额进度条行。全部 Provider 的 section 永远都在；菜单栏显示的那个置顶，其余按 `ProviderID.supported` 的相对顺序排列。选择器子菜单（`菜单栏显示 ▸`）不跟着置顶，保持固定顺序以免条目跳位。
+_Avoid_: 分组、卡片
 
 **Provider Failure**:
 单个 Provider 一次采集失败的原因（配置不可读 / 段缺失 / 凭据为空 / 凭据来自环境变量 / 远端失败）；菜单栏以短标签 `⚠︎配置` / `⚠︎凭据` 呈现。

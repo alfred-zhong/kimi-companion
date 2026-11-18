@@ -8,7 +8,7 @@ Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock �
   - DeepSeek → `¥65.92`（CNY 账户余额）
   - OpenCode Go → `16%`（5h 滚动窗口已用百分比）
   - Kimi → `¥49.59`（开放平台可用余额，CNY）
-- 弹出菜单（每个 Provider 的 section 永远都在，顺序固定 DeepSeek → OpenCode Go → Kimi）：
+- 弹出菜单（每个 Provider 的 section 永远都在；菜单栏显示的那个置顶，其余按 DeepSeek → OpenCode Go → Kimi 相对顺序）：
   - `DeepSeek`：余额行
   - `OpenCode Go`：5h / 7d / 月度三窗口进度条行（各自重置倒计时）
   - `Kimi`：余额行
@@ -133,6 +133,7 @@ swift run kimi-companion --self-check
 
 打开下拉菜单 →「菜单栏显示 ▸」→ 选中 `DeepSeek`、`OpenCode Go` 或 `Kimi`（当前项带 ✓）。
 
+- 选中的 Provider 的 section 会移到下拉菜单**最上面**（其余保持 DeepSeek → OpenCode Go → Kimi 的相对顺序），下次打开菜单即可看到。「菜单栏显示 ▸」子菜单本身仍按固定顺序排列，不跟着置顶（否则每次点完条目都会跳位）。
 - 选择会持久化到 UserDefaults，重启后保持。
 - **首次运行**时按 `config.toml` 的 `default_model` 前缀推导一次初值（推导不出则用 `DeepSeek`）；此后只有你的显式选择能改变它。
 - 某个 Provider 抓取失败**不会**把菜单栏自动切到其他 Provider；菜单栏只会显示失败短标签，其他 Provider 的 section 仍然正常显示自己的数据。
@@ -167,3 +168,4 @@ swift run kimi-companion --self-check
 - `0009-empty-workspace-cleanup.md` — 为什么允许 Keep Count = 0，以及为什么 `workspaces.json` 从绝不触碰变成受控写入（空工作区注销）
 - `0010-disable-opencode-go.md` — 为什么曾把 OpenCode Go 从 `supported` 摘掉（实现保留），以及恢复启用的方式
 - `0011-deepseek-pricing-period.md` — DeepSeek 峰谷计价的菜单栏 / 菜单标记
+- `0012-selected-provider-first-in-menu.md` — 为什么菜单里把选中的 Provider 置顶，而选择器子菜单保持固定顺序

@@ -1,6 +1,6 @@
 # kimi-companion — Agent 手册
 
-> 面向 AI 助手的仓库协作手册。补充人类规范；不重复常识。决策缘由见 `docs/adr/0001-0011`（0003 已被 0006 取代；0007 的两条被 0009 取代）。
+> 面向 AI 助手的仓库协作手册。补充人类规范；不重复常识。决策缘由见 `docs/adr/0001-0012`（0003 已被 0006 取代；0007 的两条被 0009 取代）。
 
 macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 kimi-code desktop 所用第三方 provider 的余额 / 配额，加一份**合并的** token 用量与模型请求次数（不区分 provider / model）。每 30 / 60 / 120s 刷新（默认 60s）。抓取失败永不空白：菜单栏显示 `?kimi` / `⚠︎<短标签>`，菜单给出可照抄去改配置的中文说明。
 
@@ -81,7 +81,7 @@ make clean   # rm -rf build .build
 
 ### 命名 / 模板
 - 值类型优先（`struct BalanceResult` / `TokenStats` / `HourBucket` / `DailyUsageSnapshot`），行为 / 纯函数走 `enum` 单例（`BalanceRegistry` / `SelfCheck` / `CompactFormatter` / `BalanceFormatter` / `HourlyAggregator` / `StatusBarPresenter` / `LogoCatalog` / `MenuBarSelection`）。
-- `ProviderID.supported`（`[.deepseek, .opencodeGo, .kimi]`，顺序即菜单 section 顺序）是「菜单里永远都在的 provider」的唯一来源；抓取循环、菜单 section、「菜单栏显示」子菜单、`default_model` 前缀解析都只读它。`allCases` 含 `.unknown`，只作 `default_model` 前缀未匹配的哨兵与 logo / 查表缺省分支。`Kimi` 的 `configSectionName`（`"Kimi"`）只承担展示名与前缀匹配，**不代表存在 `[providers.Kimi]` 段**（凭据走 `[services.*]`）。
+- `ProviderID.supported`（`[.deepseek, .opencodeGo, .kimi]`）是「菜单里永远都在的 provider」的唯一来源；抓取循环、「菜单栏显示」子菜单、`default_model` 前缀解析都只读它。它的顺序只是**其余** provider section 的相对顺序：菜单里选中者置顶（`StatusBarPresenter.orderedProviders(selected:)`，ADR-0012），子菜单刻意保持 `supported` 原序以免条目跳位。`allCases` 含 `.unknown`，只作 `default_model` 前缀未匹配的哨兵与 logo / 查表缺省分支。`Kimi` 的 `configSectionName`（`"Kimi"`）只承担展示名与前缀匹配，**不代表存在 `[providers.Kimi]` 段**（凭据走 `[services.*]`）。
 
 ### 文案 / 标题
 - 错误文案集中在 `ProviderFailure.menuText(provider:)` + `LiveBalanceSource.humanReadable(_:)`，新增错误显示分支优先复用。
@@ -102,7 +102,7 @@ make clean   # rm -rf build .build
 1. `ProviderID` 加 `case`（`rawValue` 小写连字符，如 `opencode-go`）+ `configSectionName`（逐字段名）+ `displayName`。像 `Kimi` 一样没有 `[providers.*]` 段时，`configSectionName` 只承担展示名与前缀匹配。
 2. `Balance/Providers.swift` 加 `struct XxxProvider: BalanceProvider`，实现 `hasCredential(creds:)` + `fetch(creds:http:) async throws`。凭据经 `CredentialSource`（`TomlCredentialSource` 实现，只读 config.toml），默认读自己的 `[providers.<段名>]`。**provider 可以刻意偏离**（`Kimi` 读 `[services.*]`、端点写死，ADR-0008），但偏离必须（a）在 `captureOne` 的穷尽 `switch` 里显式声明凭据来源，（b）单独记一条 ADR。
 3. `BalanceRegistry.provider(for:config:)` 补路由（`base_url` 从 `config?.provider(id.configSectionName)?.baseURL` 取，经 `normalizeBaseURL` 去尾斜杠 + 强制 HTTPS；写死端点的 provider 不读 `base_url`）。
-4. 加入 `ProviderID.supported`（顺序即菜单 section 顺序）。
+4. 加入 `ProviderID.supported`（决定其余 section 的相对顺序与子菜单顺序；菜单里选中者置顶，ADR-0012）。
 5. percent 型给 `quotaWindows`（`StatusBarPresenter.valueItems` 自动渲染成进度条行）；金额型给 `balance` + `currency`，`isAvailable == false` 时余额行自动追加 ` ⚠`。
 6. `LogoCatalog.assetBaseName(for:)` 补 logo 基名，并把 `Resources/<基名>@2x.png` / `@3x.png` 落地（`build.sh` 自动复制）。
 7. `SelfCheck` 补路由 / 解码 / URL / 凭据预检断言（`Kimi` 的解码与凭据预检三分支、config `[services.*]` 解析是现成模板）。
@@ -131,7 +131,7 @@ make clean   # rm -rf build .build
 | `Cleanup/SessionCleanup.swift` | 扫描 + 执行清理（唯一破坏性能力，ADR-0007 / 0009）：session 目录 / 孤儿事件 / 索引 / 账本 + 空工作区注销与空 bucket / 空账本；纯 Foundation，`Sendable` 值类型上的 `async` 包装 |
 | `Cleanup/CleanupPresenter.swift` | 清理的全部用户可见文案（纯函数、无 AppKit）：`humanBytes` / `previewContent` / `noDeletionDiagnostic` / `workspaceListing` / `completionContent` |
 | `UI/StatusBarController.swift` | `NSStatusItem` + `NSMenu` + `Timer` + Combine sink；按下一个峰谷切换点挂一次性 `Timer` 只重绘标题（ADR-0011）；`cleanupSessions()` 编排「扫描 → 预览 → 执行 → 结果」，带 `cleanupInFlight` 重入闸 |
-| `UI/StatusBarPresenter.swift` | 纯函数展示层：`renderTitle` / `renderChrome` / `renderMenu` + `MenuItemSpec` / `UsageBarSpec` |
+| `UI/StatusBarPresenter.swift` | 纯函数展示层：`renderTitle` / `renderChrome` / `renderMenu` + `orderedProviders(selected:)`（选中者置顶，ADR-0012）+ `MenuItemSpec` / `UsageBarSpec` |
 | `Balance/DeepSeekPricing.swift` | 峰谷纯函数（ADR-0011）：固定 `Asia/Shanghai`，工作日 `09:00–12:00` / `14:00–18:00` 为峰时，周末与节假日全天空闲；内置 2026 / 2027 放假日期表，表外年份返回 `.unknown`；含下一次切换点与文案（`高峰` / `低谷`、`峰` / `谷`） |
 | `UI/UsageBarMenuItemView.swift` | 自绘用量进度条菜单项（轨道 + 段色填充 + 重置倒计时） |
 | `UI/CleanupAlertPresenter.swift` | `NSAlert` 接线（预览 / 结果 / 固定 220pt 可滚动等宽详情区）；LSUIElement 下弹窗前自己抢焦点（`positionWindow` 先 `layout()` + `center()` 摆位，否则窗口停在 alert 默认 frame 的屏幕左上） |
@@ -160,7 +160,7 @@ make clean   # rm -rf build .build
 - 新增断言：在 `SelfCheck.run()` 内追加 `check("...", cond)`（纯函数 + `Bool` 条件）。不要引入 XCTest。
 - 退出码：0 = 全部通过（`[self-check] OK (全部通过)`）；1 = 任意失败（`[self-check] FAIL (N):` + 失败 label）。
 - 覆盖：各 provider 解码 / URL / 凭据预检（含 `Kimi` 三分支与 config `[services.*]` 解析）、`TokenStats`（含请求次数不参与 token 派生量）/ `CompactFormatter` / `BalanceFormatter` 边界、`DeepSeekPricing`（峰时窗口左闭右开 / 午间低谷 / 周末与调休上班日 / 节假日 / 表外年份 / 切换点跳过周末 / 字形与文案）、`HourlyAggregator` 桶边界与跨零点（含请求次数与 token 同轴）、`WireLineParser` / `WireLogReader` 增量契约（含两种事件行混排）、`RefreshController.tick` 编排（成功 / 失败 / 恢复 / stale / 配置缺失）、`StatusBarPresenter` 三渲染函数与菜单结构、`UsageBarMenuItemView` 段色与最小条宽、`SleepGuard` 到期与取消、`LogoCatalog` 资源、app 图标（icns 落地 / magic / `CFBundleIconFile` 同名 / 尺寸档位）、清理（合取四分支 / Keep Count 0 / `humanBytes` / 预览与完成文案 / `session_index.jsonl` 修剪 / 空工作区注销与复审 / alias tombstone / `workspaces.json` 备份与未知字段保留 / 损坏注册表跳过 / 临时目录端到端）。
-- 手动烟测：`open build/kimi-companion.app` 看菜单栏是否渲染出选中 provider 的余额 / `¥X.XX` / `X%` 与 logo；Finder 里 `build/kimi-companion.app` 是否显示自绘图标（不是通用图标）；「菜单栏显示」三个选项切换是否即时生效并带 ✓；「立即刷新」是否即时重抓；偏好面板档位是否 ~1 个 tick 内生效（工作区保留数能减到「不保留」）；「阻止系统休眠」是否变咖啡色胶囊 + ` ☕`、倒计时是否只在菜单打开时走动；「清理 session 文件…」是否弹出预览、点「取消」是否什么都没删；预览里是否单独列出空工作区、确认后 `workspaces.json` 是否留下 `.bak-<时间戳>`、重启 Kimi Code 后空工作区是否从侧边栏消失。`Kimi` 凭据来自 `[services.moonshot_search]`：改掉 / 删掉那把 `api_key` 应看到 `⚠︎凭据` + 中文说明，而不是空白或 `¥0.00`。
+- 手动烟测：`open build/kimi-companion.app` 看菜单栏是否渲染出选中 provider 的余额 / `¥X.XX` / `X%` 与 logo；Finder 里 `build/kimi-companion.app` 是否显示自绘图标（不是通用图标）；「菜单栏显示」三个选项切换是否即时生效并带 ✓、重新打开菜单后选中的 Provider 是否排在第一段（子菜单条目位置不应跳动）；「立即刷新」是否即时重抓；偏好面板档位是否 ~1 个 tick 内生效（工作区保留数能减到「不保留」）；「阻止系统休眠」是否变咖啡色胶囊 + ` ☕`、倒计时是否只在菜单打开时走动；「清理 session 文件…」是否弹出预览、点「取消」是否什么都没删；预览里是否单独列出空工作区、确认后 `workspaces.json` 是否留下 `.bak-<时间戳>`、重启 Kimi Code 后空工作区是否从侧边栏消失。`Kimi` 凭据来自 `[services.moonshot_search]`：改掉 / 删掉那把 `api_key` 应看到 `⚠︎凭据` + 中文说明，而不是空白或 `¥0.00`。
 - **不要**靠 unit test 覆盖率衡量进度；当前靠 `SelfCheck` + 人工菜单栏检查。
 
 ## 提交前

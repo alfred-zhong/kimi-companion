@@ -8,7 +8,7 @@
 - 支持三个 Provider：`DeepSeek`（`GET <base_url>/user/balance`，账户 CNY 余额，状态栏形如 `¥65.92`）、`OpenCode Go`（`GET <base_url>/usage`，5h 滚动 / 7d / 月度三窗口已用百分比，状态栏形如 `16%`）与 `Kimi`（`GET https://api.moonshot.cn/v1/users/me/balance`，开放平台可用余额 CNY，状态栏形如 `¥49.59`）。
 - 新增第三个 Provider `Kimi`（Moonshot 开放平台余额）：`Authorization: Bearer <api_key>`，10s 超时；展示 `data.available_balance`（= 现金 + 代金券）的单行 `余额 ¥49.59`，`available_balance ≤ 0` 时该行追加 ` ⚠`。有两处刻意的例外（决策见 `docs/adr/0008-kimi-balance-scope-and-currency.md`）：**地址与币种写死国内站**（`base_url` 一律不读；响应里没有 currency 字段，币种恒为 CNY，用国际站 key 会得到 `鉴权失败 (401)` 而不是静默的错值），**凭据取自 kimi-code 内置工具服务段** `[services.moonshot_search]`（缺失时回退 `[services.moonshot_fetch]`）的内联 `api_key`，不需要也不读 `[providers.Kimi]` 段。`code != 0` / `status != true` / `data` 缺失 / `available_balance`、`voucher_balance`、`cash_balance` 任一不可解析一律判 `响应解析失败`，不展示凭空的 `¥0.00`；凭据段缺失 / `api_key` 为空 / 只用 `api_key_env` 各给一条中文说明，状态栏短标签统一 `⚠︎凭据`。
 - 凭据只读 `~/.kimi-code/config.toml` 的 `[providers.<段名>].api_key`，本 app 不新增凭据存储、不读 Keychain、不解析 `api_key_env`（决策见 `docs/adr/0002-credentials-from-config-toml.md`）。唯一例外是 `Kimi`（见上条），它读 `[services.moonshot_search]` / `[services.moonshot_fetch]` 的内联 `api_key`。
-- 下拉菜单按 Provider 分区（固定顺序 DeepSeek → OpenCode Go → Kimi，每个 section 永远都在）：DeepSeek / Kimi 段为余额行；OpenCode Go 段为三窗口进度条行（各自重置倒计时）。每个 section 里都**不再**带该 Provider 的用量行。
+- 下拉菜单按 Provider 分区（每个 section 永远都在；菜单栏显示的那个置顶，其余按 DeepSeek → OpenCode Go → Kimi 相对顺序）：DeepSeek / Kimi 段为余额行；OpenCode Go 段为三窗口进度条行（各自重置倒计时）。每个 section 里都**不再**带该 Provider 的用量行。
 - 用量只有**一份合并**的，位于全部 Provider section 之后、「菜单栏显示」之前：`今日 · ↑输入 · ↓输出 · ⚡缓存读取 · 🎯hit%` 与 `近 5h · …`；不按 Provider / model 区分，任何 `model` 前缀的记录（含不匹配任何 Provider 的）都计入同一份合计（决策见 `docs/adr/0006-combined-usage.md`）。
 - 「菜单栏显示 ▸」子菜单切换菜单栏展示的 Provider，选择持久化到 UserDefaults；首次运行由 `default_model` 前缀推导一次初值，此后用户选择优先，采集失败不自动切换（决策见 `docs/adr/0005-menubar-provider-is-explicit.md`）。
 - 用量来源：`~/.kimi-code/sessions/<workspace>/<session>/agents/<agent>/wire.jsonl` 的 `usage.record` 行；只读 `time` 与 `usage` 四个计数，**不读 `model`**（全部记录合并统计）；12 个滑动小时桶 + 今日合并聚合，去重键为 `(相对路径, 行偏移)`。
@@ -30,6 +30,7 @@
 
 ### 变更
 
+- 下拉菜单里菜单栏显示的那个 Provider 的 section 现在**置顶**，其余两个保持 `DeepSeek → OpenCode Go → Kimi` 的相对顺序；「菜单栏显示 ▸」子菜单仍按固定顺序排列并保留 ✓（避免点完一次条目跳位）。用量块位置不变，仍在全部 section 之后（决策见 `docs/adr/0012-selected-provider-first-in-menu.md`）。
 - 恢复 `OpenCode Go`：`.opencodeGo` 加回 `ProviderID.supported`（顺序 `DeepSeek → OpenCode Go → Kimi`），三窗口额度行（5h 滚动 / 7d / 月度）与各自的 `xxx 后重置` 倒计时回到菜单，`default_model` 的 `OpenCode Go/` 前缀重新参与菜单栏初值推导；存量 `selectedProvider = "opencode-go"` 原样保留，不再被当作脏值写回。实现、解码器、logo、进度条与自检断言一直保留，启停仍是一行（决策见 `docs/adr/0010-disable-opencode-go.md` 的 Amendments）。
 - 用量行的排版变了：请求次数插在最前面（`今日 · 请求N · ↑… · ↓… · ⚡… · 🎯…%`），四项 token 的相对顺序不变。
 - `UsageEvent` 新增 `requestCount` 字段（`llm.request` 行为 `1`、`usage.record` 行为 `0`）；`WireLineParser` 从「只认 `usage.record`」改为「认 `usage.record` + `llm.request`」，`model` / `modelAlias` / `provider` 一律不读的不变量不变。

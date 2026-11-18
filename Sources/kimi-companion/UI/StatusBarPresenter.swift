@@ -282,10 +282,13 @@ public enum StatusBarPresenter {
 
     /// 弹出菜单。
     ///
-    /// 结构（固定顺序，`ProviderID.supported` 每个 provider 的 section 永远都在；用量只有**一份合并**的，不按 provider 分）：
+    /// 结构（`ProviderID.supported` 每个 provider 的 section 永远都在，选中者置顶；用量只有**一份合并**的，不按 provider 分）：
     /// ```
-    /// DeepSeek
+    /// DeepSeek                 ← 菜单栏显示的那个
     ///   余额 ¥65.92 [⚠]
+    /// ──────
+    /// OpenCode Go
+    ///   5h / 7d / 月度 进度条
     /// ──────
     /// Kimi
     ///   余额 ¥49.59 [⚠]
@@ -293,7 +296,7 @@ public enum StatusBarPresenter {
     /// 今日 · 请求 … · ↑… · ↓… · ⚡… · 🎯…%
     /// 近 5h · 请求 … · …
     /// ──────
-    /// 菜单栏显示 ▸ (DeepSeek / Kimi，选中打 ✓)
+    /// 菜单栏显示 ▸ (DeepSeek / OpenCode Go / Kimi，选中打 ✓，顺序固定)
     /// ──────
     /// 阻止系统休眠 ▸ (30 / 60 / 120 分钟) + 倒计时行 + 取消守护
     /// ──────
@@ -303,12 +306,13 @@ public enum StatusBarPresenter {
     /// ──────
     /// 退出
     /// ```
-    /// 每个受支持 provider 都产生自己的 section，顺序 = `ProviderID.supported`；
+    /// provider section 的顺序见 `orderedProviders(selected:)`；「菜单栏显示」子菜单刻意保持
+    /// `ProviderID.supported` 固定顺序（置顶的选择器会让条目在每次点击后跳位）。
     /// 三窗口进度条也由同一个 `valueItems` 渲染。
     public static func renderMenu(_ inputs: Inputs, now: Date = Date()) -> [MenuItemSpec] {
         var items: [MenuItemSpec] = []
 
-        for (index, pid) in ProviderID.supported.enumerated() {
+        for (index, pid) in orderedProviders(selected: inputs.selectedProvider).enumerated() {
             if index > 0 { items.append(.separator) }
             items.append(contentsOf: providerSection(pid, inputs, now: now))
         }
@@ -322,6 +326,7 @@ public enum StatusBarPresenter {
 
         items.append(.separator)
 
+        // 子菜单刻意保持 `ProviderID.supported` 固定顺序：置顶的选择器会让条目在每次点击后跳位。
         let sub = ProviderID.supported.map { pid in
             MenuItemSpec(
                 title: "\(pid.displayName)\(inputs.selectedProvider == pid ? " ✓" : "")",
@@ -343,6 +348,13 @@ public enum StatusBarPresenter {
         items.append(.separator)
         items.append(MenuItemSpec(title: "退出", key: "q", action: .quit))
         return items
+    }
+
+    /// provider section 的展示顺序：选中的置顶，其余保持 `ProviderID.supported` 的相对顺序。
+    /// 选中值不在 `supported` 里（`SettingsStore` 会自愈，正常不会出现）时退化为 `supported` 原序。
+    static func orderedProviders(selected: ProviderID) -> [ProviderID] {
+        guard ProviderID.supported.contains(selected) else { return ProviderID.supported }
+        return [selected] + ProviderID.supported.filter { $0 != selected }
     }
 
     /// 单个 provider 的 section：header（只有 provider 名，不带模型名）+ 余额 / 配额行。

@@ -37,8 +37,9 @@ public enum ProviderID: String, CaseIterable, Sendable {
     /// 面向用户的展示名（菜单 section header）。与段名同值。
     public var displayName: String { configSectionName }
 
-    /// 下拉菜单里始终展示的 provider，顺序固定：DeepSeek → OpenCode Go → Kimi。
-    /// 抓取循环、菜单 section、「菜单栏显示」子菜单、`default_model` 前缀解析都只读它；
+    /// 下拉菜单里始终展示的 provider：DeepSeek → OpenCode Go → Kimi。
+    /// 它的顺序是**其余** section 的相对顺序（菜单栏显示的那个 section 置顶，ADR-0012）。
+    /// 抓取循环、「菜单栏显示」子菜单、`default_model` 前缀解析都只读它；
     /// 想临时停用某个 provider，把它从这个列表摘掉即可（实现与断言保留，ADR-0010）。
     public static let supported: [ProviderID] = [.deepseek, .opencodeGo, .kimi]
 
