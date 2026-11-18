@@ -180,7 +180,10 @@ public enum StatusBarPresenter {
     ///
     /// 守护激活时只在余额右侧追加 ` ☕`（咖啡色），不改变 `logoTextGap` ——
     /// 激活前后 logo 与数值的间距必须完全一致。
-    public static func renderTitle(_ inputs: Inputs) -> NSAttributedString {
+    ///
+    /// 选中 DeepSeek 且余额有值时，金额右侧追加峰谷字形（` 峰` / ` 谷`，ADR-0011）：
+    /// 恒定一个字形，跨越 09:00 / 18:00 时菜单栏宽度不抖。节假日表未覆盖的年份不追加字形。
+    public static func renderTitle(_ inputs: Inputs, now: Date = Date()) -> NSAttributedString {
         let active = inputs.caffeinateSession != nil
 
         if inputs.configMissing {
@@ -190,13 +193,65 @@ public enum StatusBarPresenter {
 
         let state = inputs.balance(for: inputs.selectedProvider)
         if let result = state.result {
-            let text = BalanceFormatter.statusBarText(result)
+            let text = BalanceFormatter.statusBarText(result) + periodGlyph(inputs.selectedProvider, now: now)
             return compose(body: text, caffeinateActive: active)
         }
         if let failure = state.failure {
             return compose(body: "⚠︎\(failure.statusBarTag)", caffeinateActive: active)
         }
         return NSAttributedString(string: "\(logoTextGap)···")
+    }
+
+    // MARK: - 峰谷（ADR-0011）
+
+    /// 菜单栏峰谷字形（含前导空格）。非 DeepSeek、未知年份、失败 / 配置缺失分支都返回空串。
+    private static func periodGlyph(_ pid: ProviderID, now: Date) -> String {
+        guard pid == .deepseek,
+              let glyph = DeepSeekPricing.glyph(DeepSeekPricing.period(at: now))
+        else { return "" }
+        return " \(glyph)"
+    }
+
+    /// 下一个切换点的说明（前导 ` · `）：同日只写时钟，次日 `明日 HH:mm`，更远 `周X HH:mm`。
+    /// 表外年份或不存在的切换点返回空串。
+    private static func transitionSuffix(_ now: Date) -> String {
+        guard let next = DeepSeekPricing.nextTransition(after: now), next.period != .unknown else {
+            return ""
+        }
+        return " · \(clockText(next.date, relativeTo: now)) 转\(DeepSeekPricing.label(next.period))"
+    }
+
+    /// 绝对时钟文案（`HH:mm`，必要时带 `明日` / `周X`）。用绝对时间而不是倒计时：
+    /// 菜单只在打开时重建，倒计时会立刻过期，而绝对时间不会。
+    static func clockText(_ date: Date, relativeTo now: Date) -> String {
+        let calendar = DeepSeekPricing.calendar
+        let parts = calendar.dateComponents([.hour, .minute, .weekday], from: date)
+        let clock = String(format: "%02d:%02d", parts.hour ?? 0, parts.minute ?? 0)
+        let dayGap = calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: now),
+            to: calendar.startOfDay(for: date)
+        ).day ?? 0
+        switch dayGap {
+        case ...0: return clock
+        case 1: return "明日 \(clock)"
+        default:
+            let names = ["日", "一", "二", "三", "四", "五", "六"]
+            return "周\(names[((parts.weekday ?? 1) - 1) % 7]) \(clock)"
+        }
+    }
+
+    /// DeepSeek 余额行尾的峰谷说明（前导 ` · `）；其它 provider 返回 nil。
+    static func pricingSuffix(_ pid: ProviderID, now: Date) -> String? {
+        guard pid == .deepseek else { return nil }
+        let period = DeepSeekPricing.period(at: now)
+        switch period {
+        case .unknown:
+            return " · 计费时段未知（表未覆盖 \(DeepSeekPricing.year(at: now))）"
+        case .peak, .offPeak:
+            let halfPrice = period == .offPeak ? " · 半价" : ""
+            return " · \(DeepSeekPricing.label(period))\(halfPrice)\(transitionSuffix(now))"
+        }
     }
 
     private static func compose(body: String, caffeinateActive: Bool) -> NSAttributedString {
@@ -297,7 +352,7 @@ public enum StatusBarPresenter {
         let state = inputs.balance(for: pid)
 
         if let result = state.result {
-            items.append(contentsOf: valueItems(result, now: now))
+            items.append(contentsOf: valueItems(result, pid: pid, now: now))
         } else if state.failure == nil {
             items.append(MenuItemSpec(title: "余额: ···", enabled: false))
         }
@@ -331,14 +386,15 @@ public enum StatusBarPresenter {
 
     /// 余额 / 配额的数值行。
     ///
-    /// `internal`（而非 `private`）只为 `SelfCheck` 继续覆盖休眠的 OpenCode Go 百分比路径
-    /// （ADR-0010）：该 provider 已不进菜单，`providerSection` 不再实际渲染 percent 结果。
-    static func valueItems(_ result: BalanceResult, now: Date) -> [MenuItemSpec] {
+    /// `internal`（而非 `private`）只为 `SelfCheck` 直接覆盖 percent 路径（ADR-0010）。
+    /// 金额型 provider 的余额行尾由 `pricingSuffix` 追加峰谷说明（只有 DeepSeek 有）。
+    static func valueItems(_ result: BalanceResult, pid: ProviderID, now: Date) -> [MenuItemSpec] {
         switch result.currency {
         case .cny, .usd:
             // `is_available: false` 时金额仍是真数据，但要能看出当前不可用。
             var text = "余额 \(BalanceFormatter.menuBarText(result))"
             if result.isAvailable == false { text += " ⚠" }
+            if let pricingSuffix = pricingSuffix(pid, now: now) { text += pricingSuffix }
             return [MenuItemSpec(title: text, enabled: false)]
         case .percent:
             guard let windows = result.quotaWindows, !windows.isEmpty else {

@@ -157,3 +157,4 @@ swift run kimi-companion --self-check
 - `0008-kimi-balance-scope-and-currency.md` — `Kimi` 余额的范围与币种：为什么端点写死国内站、币种恒为 CNY，以及为什么凭据取自内置工具服务段而非 `[providers.*]`
 - `0009-empty-workspace-cleanup.md` — 为什么允许 Keep Count = 0，以及为什么 `workspaces.json` 从绝不触碰变成受控写入（空工作区注销）
 - `0010-disable-opencode-go.md` — 为什么默认停用 OpenCode Go（代码保留、不进菜单也不抓取），以及如何恢复
+- `0011-deepseek-pricing-period.md` — DeepSeek 峰谷计价的菜单栏 / 菜单标记

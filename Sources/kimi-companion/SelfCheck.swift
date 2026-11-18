@@ -11,6 +11,15 @@ public enum SelfCheck {
             if !cond { failures.append(name) }
         }
 
+        /// 北京时间构造固定时刻：峰谷断言必须钉死时刻，不能跟墙上时钟走。
+        func shanghai(_ year: Int, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int) -> Date {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+            return calendar.date(from: DateComponents(
+                year: year, month: month, day: day, hour: hour, minute: minute
+            ))!
+        }
+
         // 等 async 结果时泵主 runloop，让 RefreshController 能在 MainActor 上发布。
         func sync<T: Sendable>(_ op: @escaping @Sendable () async -> T) -> T {
             let sema = DispatchSemaphore(value: 0)
@@ -1311,9 +1320,113 @@ public enum SelfCheck {
                 && ProviderBalanceState(provider: .opencodeGo).failure == nil)
         }
 
+        // MARK: - DeepSeekPricing（峰谷判定 / 切换点 / 文案）
+
+        do {
+            // 2026-11-18 是周三。峰时窗口左闭右开。
+            check("Pricing.peak.start", DeepSeekPricing.period(at: shanghai(2026, 11, 18, 9, 0)) == .peak)
+            check("Pricing.peak.beforeStart", DeepSeekPricing.period(at: shanghai(2026, 11, 18, 8, 59)) == .offPeak)
+            check("Pricing.peak.beforeEnd", DeepSeekPricing.period(at: shanghai(2026, 11, 18, 11, 59)) == .peak)
+            check("Pricing.midday.start", DeepSeekPricing.period(at: shanghai(2026, 11, 18, 12, 0)) == .offPeak)
+            check("Pricing.midday.whole", DeepSeekPricing.period(at: shanghai(2026, 11, 18, 13, 59)) == .offPeak)
+            check("Pricing.afternoon.start", DeepSeekPricing.period(at: shanghai(2026, 11, 18, 14, 0)) == .peak)
+            check("Pricing.evening.end", DeepSeekPricing.period(at: shanghai(2026, 11, 18, 18, 0)) == .offPeak)
+            check("Pricing.night", DeepSeekPricing.period(at: shanghai(2026, 11, 18, 23, 30)) == .offPeak)
+
+            // 周末全天空闲；调休上班的周日（2026-01-04）也按周末算。
+            check("Pricing.weekend.saturday", DeepSeekPricing.period(at: shanghai(2026, 11, 21, 10, 0)) == .offPeak)
+            check("Pricing.weekend.sunday", DeepSeekPricing.period(at: shanghai(2026, 11, 22, 10, 0)) == .offPeak)
+            check("Pricing.weekend.makeUpWorkday", DeepSeekPricing.period(at: shanghai(2026, 1, 4, 10, 0)) == .offPeak)
+
+            // 法定节假日全天空闲，节后首个工作日恢复。
+            check("Pricing.holiday.national", DeepSeekPricing.period(at: shanghai(2026, 10, 1, 10, 0)) == .offPeak)
+            check("Pricing.holiday.springFestival", DeepSeekPricing.period(at: shanghai(2026, 2, 16, 10, 0)) == .offPeak)
+            check("Pricing.holiday.resumes", DeepSeekPricing.period(at: shanghai(2026, 10, 8, 10, 0)) == .peak)
+            check("Pricing.holiday.2027", DeepSeekPricing.period(at: shanghai(2027, 10, 4, 10, 0)) == .offPeak)
+
+            // 表外年份不猜。
+            check("Pricing.unknownYear", DeepSeekPricing.period(at: shanghai(2028, 1, 5, 10, 0)) == .unknown)
+            check("Pricing.tableCovers", DeepSeekPricing.tableCovers(2026)
+                && DeepSeekPricing.tableCovers(2027) && !DeepSeekPricing.tableCovers(2028))
+
+            // 切换点：同日 / 明日 / 跳过周末。
+            let morning = shanghai(2026, 11, 18, 10, 0)
+            let midday = shanghai(2026, 11, 18, 12, 30)
+            let fridayEvening = shanghai(2026, 11, 20, 18, 30)
+            let t1 = DeepSeekPricing.nextTransition(after: morning)
+            check("Pricing.transition.sameDay",
+                  t1?.period == .offPeak && t1?.date == shanghai(2026, 11, 18, 12, 0))
+            let t2 = DeepSeekPricing.nextTransition(after: midday)
+            check("Pricing.transition.toPeak",
+                  t2?.period == .peak && t2?.date == shanghai(2026, 11, 18, 14, 0))
+            // 周五傍晚之后下一次切换在周一 09:00：周末不产生切换。
+            let t3 = DeepSeekPricing.nextTransition(after: fridayEvening)
+            check("Pricing.transition.skipsWeekend",
+                  t3?.period == .peak && t3?.date == shanghai(2026, 11, 23, 9, 0))
+            check("Pricing.transition.unknownYear",
+                  DeepSeekPricing.nextTransition(after: shanghai(2028, 1, 5, 10, 0)) == nil)
+
+            // 文案。
+            check("Pricing.label", DeepSeekPricing.label(.peak) == "高峰"
+                && DeepSeekPricing.label(.offPeak) == "低谷" && DeepSeekPricing.label(.unknown) == "未知")
+            check("Pricing.glyph", DeepSeekPricing.glyph(.peak) == "峰"
+                && DeepSeekPricing.glyph(.offPeak) == "谷" && DeepSeekPricing.glyph(.unknown) == nil)
+            check("Pricing.clock.sameDay",
+                  StatusBarPresenter.clockText(shanghai(2026, 11, 18, 12, 0), relativeTo: morning) == "12:00")
+            check("Pricing.clock.tomorrow",
+                  StatusBarPresenter.clockText(shanghai(2026, 11, 19, 9, 0), relativeTo: shanghai(2026, 11, 18, 23, 0)) == "明日 09:00")
+            check("Pricing.clock.weekday",
+                  StatusBarPresenter.clockText(shanghai(2026, 11, 23, 9, 0), relativeTo: fridayEvening) == "周一 09:00")
+
+            // 标题字形：恒定一个字；失败 / 配置缺失 / 其它 provider 一律不挂。
+            let dsOK = BalanceResult(provider: .deepseek, balance: 65.92, currency: .cny, isAvailable: true)
+            let dsState = ProviderBalanceState(provider: .deepseek, result: dsOK, capturedAt: morning)
+            let dsInputs = StatusBarPresenter.Inputs(selectedProvider: .deepseek, balances: [.deepseek: dsState])
+            check("Title.pricing.peak",
+                  StatusBarPresenter.renderTitle(dsInputs, now: morning).string == "\u{2009}\u{2009}¥65.92 峰")
+            check("Title.pricing.offPeak",
+                  StatusBarPresenter.renderTitle(dsInputs, now: midday).string == "\u{2009}\u{2009}¥65.92 谷")
+            check("Title.pricing.unknownSilent",
+                  StatusBarPresenter.renderTitle(dsInputs, now: shanghai(2028, 1, 5, 10, 0)).string == "\u{2009}\u{2009}¥65.92")
+            let session = CaffeinateSession(bucket: .sixtyMinutes, startedAt: midday, endAt: midday.addingTimeInterval(3600))
+            check("Title.pricing.beforeCoffee",
+                  StatusBarPresenter.renderTitle(
+                      .init(selectedProvider: .deepseek, balances: [.deepseek: dsState], caffeinateSession: session), now: midday
+                  ).string == "\u{2009}\u{2009}¥65.92 谷 \u{2615}")
+            let failed = ProviderBalanceState(provider: .deepseek, failure: .fetch("响应解析失败"))
+            check("Title.pricing.noGlyphOnFailure",
+                  StatusBarPresenter.renderTitle(.init(selectedProvider: .deepseek, balances: [.deepseek: failed]), now: midday).string
+                  == "\u{2009}\u{2009}⚠︎")
+            check("Title.pricing.noGlyphWhenConfigMissing",
+                  StatusBarPresenter.renderTitle(.init(configMissing: true, selectedProvider: .deepseek, balances: [.deepseek: dsState]), now: midday).string
+                  == "\u{2009}\u{2009}?kimi")
+
+            // 菜单行文案：状态必在，半价只出现在低谷，切换点用绝对时钟。
+            let peakRow = "余额 ¥65.92 · 高峰 · 12:00 转低谷"
+            let offPeakRow = "余额 ¥65.92 · 低谷 · 半价 · 14:00 转高峰"
+            let weekendRow = "余额 ¥65.92 · 低谷 · 半价 · 周一 09:00 转高峰"
+            check("Menu.pricing.peakRow", StatusBarPresenter.renderMenu(dsInputs, now: morning).map(\.title).contains(peakRow))
+            check("Menu.pricing.offPeakRow", StatusBarPresenter.renderMenu(dsInputs, now: midday).map(\.title).contains(offPeakRow))
+            check("Menu.pricing.weekendRow", StatusBarPresenter.renderMenu(dsInputs, now: fridayEvening).map(\.title).contains(weekendRow))
+            check("Menu.pricing.unknownRow",
+                  StatusBarPresenter.renderMenu(dsInputs, now: shanghai(2028, 1, 5, 10, 0)).map(\.title)
+                      .contains("余额 ¥65.92 · 计费时段未知（表未覆盖 2028）"))
+            check("Menu.pricing.halfPriceOnlyOffPeak", !peakRow.contains("半价"))
+
+            // 其它 provider 的余额行不受影响。
+            let kimiOK = BalanceResult(provider: .kimi, balance: 49.59, currency: .cny, isAvailable: true)
+            check("Menu.pricing.kimiUntouched",
+                  StatusBarPresenter.renderMenu(
+                      .init(balances: [.kimi: ProviderBalanceState(provider: .kimi, result: kimiOK)]), now: morning
+                  ).map(\.title).contains("余额 ¥49.59"))
+        }
+
         // MARK: - StatusBarPresenter.renderTitle（优先级链）
 
         do {
+            // 本 block 钉死到「工作日低谷」时刻（2026-11-18 周三 12:30），
+            // 否则峰谷字形断言会随墙上时钟在 `峰` / `谷` 之间翻转。
+            let now = shanghai(2026, 11, 18, 12, 30)
             let dsOK = BalanceResult(provider: .deepseek, balance: 65.92, currency: .cny, isAvailable: true)
             let ocOK = BalanceResult(
                 provider: .opencodeGo, balance: 16, currency: .percent, usedPercent: 16,
@@ -1334,7 +1447,7 @@ public enum SelfCheck {
 
             // 2) 选中 DeepSeek：CNY 2 位小数。
             let dsSelected = StatusBarPresenter.Inputs(selectedProvider: .deepseek, balances: [.deepseek: dsState, .opencodeGo: ocState])
-            check("Title.deepseek", StatusBarPresenter.renderTitle(dsSelected).string == "\u{2009}\u{2009}¥65.92")
+            check("Title.deepseek", StatusBarPresenter.renderTitle(dsSelected, now: now).string == "\u{2009}\u{2009}¥65.92 谷")
 
             // 3) 选中 OpenCode Go：rolling 百分比、无标签。
             let ocSelected = StatusBarPresenter.Inputs(selectedProvider: .opencodeGo, balances: [.deepseek: dsState, .opencodeGo: ocState])
@@ -1370,8 +1483,8 @@ public enum SelfCheck {
             // 另一个 provider 挂了，不影响选中 provider 的标题。
             let otherFailed = ProviderBalanceState(provider: .opencodeGo, failure: .fetch("x"))
             check("Title.otherFailureIgnored",
-                  StatusBarPresenter.renderTitle(.init(selectedProvider: .deepseek, balances: [.deepseek: dsState, .opencodeGo: otherFailed])).string
-                  == "\u{2009}\u{2009}¥65.92")
+                  StatusBarPresenter.renderTitle(.init(selectedProvider: .deepseek, balances: [.deepseek: dsState, .opencodeGo: otherFailed]), now: now).string
+                  == "\u{2009}\u{2009}¥65.92 谷")
 
             // 5) 尚未采集 → "···"。
             check("Title.empty", StatusBarPresenter.renderTitle(.init()).string == "\u{2009}\u{2009}···")
@@ -1381,9 +1494,9 @@ public enum SelfCheck {
 
             // 6) caffeinate：只在末尾追加 ` ☕`，logo 与数值的间距保持不变。
             let session = CaffeinateSession(bucket: .sixtyMinutes, startedAt: now, endAt: now.addingTimeInterval(3600))
-            let active = StatusBarPresenter.renderTitle(.init(selectedProvider: .deepseek, balances: [.deepseek: dsState], caffeinateSession: session))
-            check("Title.active.padded", active.string == "\u{2009}\u{2009}¥65.92 \u{2615}")
-            check("Title.active.sameGap", active.string == StatusBarPresenter.renderTitle(dsSelected).string + " \u{2615}")
+            let active = StatusBarPresenter.renderTitle(.init(selectedProvider: .deepseek, balances: [.deepseek: dsState], caffeinateSession: session), now: now)
+            check("Title.active.padded", active.string == "\u{2009}\u{2009}¥65.92 谷 \u{2615}")
+            check("Title.active.sameGap", active.string == StatusBarPresenter.renderTitle(dsSelected, now: now).string + " \u{2615}")
             check("Title.active.noLeadingPad", !active.string.hasPrefix("\u{2009}\u{2009} "))
             check("Title.active.coffeeAtEnd", active.string.hasSuffix(" \u{2615}"))
             if let idx = active.string.range(of: "\u{2615}")?.lowerBound {
@@ -1416,6 +1529,8 @@ public enum SelfCheck {
         // MARK: - StatusBarPresenter.renderMenu
 
         do {
+            // 同标题 block：钉死到工作日低谷（2026-11-18 周三 12:30）。
+            let now = shanghai(2026, 11, 18, 12, 30)
             let dsOK = BalanceResult(provider: .deepseek, balance: 65.92, currency: .cny, isAvailable: true)
             let windows = [
                 QuotaWindow(id: "5h", label: "5h", usedPercent: 16, status: "ok", resetsAt: now.addingTimeInterval(3 * 3600 + 15 * 60)),
@@ -1463,8 +1578,8 @@ public enum SelfCheck {
                   StatusBarPresenter.renderMenu(.init()).map(\.title).filter { providerHeaders.contains($0) }
                   == ["DeepSeek", "Kimi"])
 
-            // DeepSeek / Kimi 各一行余额（金额型），后者紧跟自己的 header。
-            check("Menu.deepseek.balanceLine", titles.contains("余额 ¥65.92"))
+            // DeepSeek / Kimi 各一行余额（金额型），后者紧跟自己的 header；DeepSeek 行尾带峰谷说明。
+            check("Menu.deepseek.balanceLine", titles.contains("余额 ¥65.92 · 低谷 · 半价 · 14:00 转高峰"))
             check("Menu.kimi.balanceLine", titles.contains("余额 ¥49.59"))
             if let kimiIdx = titles.firstIndex(of: "Kimi") {
                 check("Menu.kimi.balanceLineFollowsHeader", titles[kimiIdx + 1] == "余额 ¥49.59")
@@ -1474,7 +1589,7 @@ public enum SelfCheck {
             }
             // 休眠的 OpenCode Go 不再产生菜单 section（ADR-0010）；三窗口进度条的映射
             // 仍由 `valueItems` 直接覆盖，恢复 provider 时不需要重写这部分断言。
-            let bars = StatusBarPresenter.valueItems(ocOK, now: now).compactMap(\.usageBar)
+            let bars = StatusBarPresenter.valueItems(ocOK, pid: .opencodeGo, now: now).compactMap(\.usageBar)
             check("Menu.opencode.barCount", bars.count == 3)
             check("Menu.opencode.labels", bars.map(\.leftText) == ["5h", "7d", "月度"])
             check("Menu.opencode.percentTexts", bars.map(\.percentText) == ["16%", "22%", "13%"])
@@ -1528,7 +1643,8 @@ public enum SelfCheck {
                 .init(balances: [.deepseek: ProviderBalanceState(provider: .deepseek, result: unavailable)]),
                 now: now
             )
-            check("Menu.deepseek.isAvailableFalse", naItems.map(\.title).contains("余额 ¥65.92 ⚠"))
+            check("Menu.deepseek.isAvailableFalse",
+                  naItems.map(\.title).contains("余额 ¥65.92 ⚠ · 低谷 · 半价 · 14:00 转高峰"))
 
             // 非 "ok" 窗口：进度条转红 + 行内带出原始 status 串。
             let limitedWindows = [
@@ -1537,7 +1653,7 @@ public enum SelfCheck {
                 QuotaWindow(id: "monthly", label: "月度", usedPercent: 13, status: "rate-limited", resetsAt: now.addingTimeInterval(3600)),
             ]
             let limited = BalanceResult(provider: .opencodeGo, balance: 16, currency: .percent, usedPercent: 16, quotaWindows: limitedWindows)
-            let limitedBars = StatusBarPresenter.valueItems(limited, now: now).compactMap(\.usageBar)
+            let limitedBars = StatusBarPresenter.valueItems(limited, pid: .opencodeGo, now: now).compactMap(\.usageBar)
             check("Menu.limited.okFlags", limitedBars.map(\.isOK) == [true, true, false])
             check("Menu.limited.rawStatusVisible", limitedBars[2].resetText == "rate-limited · 1h0m 后重置")
             check("Menu.limited.okRowUnchanged", limitedBars[0].resetText == "1h0m 后重置")
@@ -1600,7 +1716,7 @@ public enum SelfCheck {
                 now: now
             )
             let mixedTitles = mixed.map(\.title)
-            check("Menu.independent.otherStillShown", mixedTitles.contains("余额 ¥65.92"))
+            check("Menu.independent.otherStillShown", mixedTitles.contains("余额 ¥65.92 · 低谷 · 半价 · 14:00 转高峰"))
             check("Menu.independent.kimiError", mixedTitles.contains("services.moonshot_search 的 api_key 为空"))
             check("Menu.independent.order", (mixedTitles.firstIndex(of: "services.moonshot_search 的 api_key 为空") ?? 0)
                 > (mixedTitles.firstIndex(of: "Kimi") ?? 0))
@@ -1623,7 +1739,7 @@ public enum SelfCheck {
                 )]),
                 now: now
             ).map(\.title)
-            check("Menu.stale.keepsValue", stale.contains("余额 ¥65.92"))
+            check("Menu.stale.keepsValue", stale.contains("余额 ¥65.92 · 低谷 · 半价 · 14:00 转高峰"))
             check("Menu.stale.labelsOldValue", stale.contains("⚠ 旧值 · 请求超时 (10 秒)"))
 
             // 「菜单栏显示 ▸」子菜单：每个受支持 provider 一个 radio 项，选中带 ✓。

@@ -5,7 +5,10 @@ import QuartzCore
 
 /// StatusBar controller：Timer / Combine 订阅 / 把 `StatusBarPresenter` 的输出写到 `NSStatusItem` + `NSMenu`。
 /// 全部「AppState → 视觉」逻辑都在 `StatusBarPresenter`（纯函数），这里只做转发。
-public final class StatusBarController: NSObject, NSMenuDelegate {
+///
+/// `@unchecked Sendable`：主线程独占（Timer block 跑在主 run loop、Combine 走 `RunLoop.main`、
+/// 菜单回调都在主线程），所有可变字段只在这条线程上读写。
+public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sendable {
     private let statusItem: NSStatusItem
     private let controller: RefreshController
     private let state: AppState
@@ -19,6 +22,8 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
     private let cleanup: SessionCleanup
     /// 每次清理前现取一次策略（偏好面板随时可改，不在 init 时快照）。
     private let currentPolicy: () -> RetentionPolicy
+    /// 峰谷切换点的精确唤醒（ADR-0011）：到点只重绘标题，不发网络请求。
+    private var boundaryTimer: Timer?
     /// 扫描 / 弹窗 / 删除期间的 in-flight 标志：再点菜单项不产生第二个弹窗。
     private var cleanupInFlight = false
     private var caffeinateHeaderItem: NSMenuItem?
@@ -61,6 +66,7 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
 
     deinit {
         timer?.invalidate()
+        boundaryTimer?.invalidate()
     }
 
     /// 偏好面板切换刷新档位后调用。
@@ -113,9 +119,33 @@ public final class StatusBarController: NSObject, NSMenuDelegate {
     @MainActor
     private func refreshAll() {
         let inputs = currentInputs()
-        statusItem.button?.attributedTitle = StatusBarPresenter.renderTitle(inputs)
+        let now = Date()
+        statusItem.button?.attributedTitle = StatusBarPresenter.renderTitle(inputs, now: now)
         applyChrome(StatusBarPresenter.renderChrome(inputs))
         refreshLogo()
+        scheduleBoundaryRefresh(now: now)
+    }
+
+    /// 在下一个峰谷切换点精确重绘一次标题。刷新周期最长 120s，
+    /// 靠 tick 会滞后最多 2 分钟，而 09:00 / 18:00 恰好是「该不该现在跑批」的判断时刻。
+    /// 只重绘、不抓取：真正需要网络的那次仍由常规 tick 负责。
+    @MainActor
+    private func scheduleBoundaryRefresh(now: Date) {
+        boundaryTimer?.invalidate()
+        boundaryTimer = nil
+        guard state.selectedProvider == .deepseek, !state.configMissing,
+              let next = DeepSeekPricing.nextTransition(after: now)
+        else { return }
+        let timer = Timer.scheduledTimer(
+            withTimeInterval: max(next.date.timeIntervalSince(now), 0.5),
+            repeats: false
+        ) { [weak self] _ in
+            guard let self else { return }
+            // Timer 在主 run loop 上 fire，直接假定主线程隔离（与 `wireState` 的桥接同款）。
+            MainActor.assumeIsolated { self.refreshAll() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        boundaryTimer = timer
     }
 
     /// 把选中 provider 的 logo 写到 status button。`LogoCatalog` 内部已打 template 标记；
