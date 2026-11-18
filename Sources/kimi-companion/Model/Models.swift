@@ -4,24 +4,23 @@ import Foundation
 
 /// kimi-code 经 `~/.kimi-code/config.toml` 的 `[providers.*]` 配置的第三方模型服务商。
 ///
-/// 当前生效两个：`DeepSeek`（账户余额，CNY）与 `Kimi`（Moonshot 开放平台可用余额，CNY）。
-/// `OpenCode Go`（三窗口配额，百分比）已默认停用但保留全部实现，恢复方式见
-/// `docs/adr/0010-disable-opencode-go.md`。
-/// `Kimi` 与 `DeepSeek` 有两处不同（决策见 `docs/adr/0008-kimi-balance-scope-and-currency.md`）：
+/// 当前生效三个：`DeepSeek`（账户余额，CNY）、`OpenCode Go`（三窗口配额，百分比）与
+/// `Kimi`（Moonshot 开放平台可用余额，CNY）。`OpenCode Go` 曾在 2026-11 停用，
+/// 恢复启用见 `docs/adr/0010-disable-opencode-go.md` 的 Amendments。
+/// `Kimi` 与其它两个有两处不同（决策见 `docs/adr/0008-kimi-balance-scope-and-currency.md`）：
 /// 端点写死国内站 `api.moonshot.cn`，且凭据来自 `[services.moonshot_*]` 而非 provider 段。
 /// first-party `managed:kimi-code` 有意不支持：它的 `api_key` 恒为空、走 OAuth，
 /// 且本地 `oauth/usage` 端点只覆盖该账号（产品上已排除）。
 public enum ProviderID: String, CaseIterable, Sendable {
     case deepseek
-    /// 默认停用（不在 `supported` 里，ADR-0010）：代码 / 解码器 / logo / 断言全部保留，
-    /// 恢复只需把它加回 `supported`。
+    /// 三窗口配额型（`5h` 滚动 / `7d` / 月度）。ADR-0010 曾把它从 `supported` 摘掉，
+    /// 2026-11-18 恢复启用；实现、解码器、logo、断言一直保留，启停都是一行。
     case opencodeGo = "opencode-go"
     case kimi
     /// 未匹配任何受支持 provider；只用作 `default_model` 前缀推导的失败哨兵与 logo 缺省分支。
     case unknown
 
     /// config.toml 里的段名，**逐字**使用（`"OpenCode Go"` 含空格）。
-    /// 休眠的 `OpenCode Go` 仍保留段名，恢复后可直接按它查凭据 / 对 `default_model` 前缀。
     ///
     /// `Kimi` 是例外：它没有 `[providers.Kimi]` 段，这里只承担展示名与 `default_model`
     /// 前缀匹配，凭据来自 `[services.moonshot_*]`（ADR-0008）。
@@ -38,14 +37,13 @@ public enum ProviderID: String, CaseIterable, Sendable {
     /// 面向用户的展示名（菜单 section header）。与段名同值。
     public var displayName: String { configSectionName }
 
-    /// 下拉菜单里始终展示的 provider，顺序固定：DeepSeek → Kimi。
-    /// 休眠的 `OpenCode Go` 刻意不在此列表（ADR-0010）：不抓取、不进菜单、
-    /// 不参与 `default_model` 前缀匹配；把 `.opencodeGo` 加回来即可恢复。
-    public static let supported: [ProviderID] = [.deepseek, .kimi]
+    /// 下拉菜单里始终展示的 provider，顺序固定：DeepSeek → OpenCode Go → Kimi。
+    /// 抓取循环、菜单 section、「菜单栏显示」子菜单、`default_model` 前缀解析都只读它；
+    /// 想临时停用某个 provider，把它从这个列表摘掉即可（实现与断言保留，ADR-0010）。
+    public static let supported: [ProviderID] = [.deepseek, .opencodeGo, .kimi]
 
     /// 由 `usage.record.model` 的 `<Provider>/<model>` 前缀解析 provider。
-    /// 段名逐字匹配（含空格），另接受 rawValue 小写形式；休眠的 `OpenCode Go` 因此
-    /// 解析为 `.unknown`，其余一律 `.unknown`。
+    /// 段名逐字匹配（含空格），另接受 rawValue 小写形式；未匹配一律 `.unknown`。
     public static func fromModelPrefix(_ prefix: String) -> ProviderID {
         let trimmed = prefix.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return .unknown }
@@ -65,7 +63,7 @@ public enum ProviderID: String, CaseIterable, Sendable {
 
 /// 首次运行时菜单栏 provider 的推导规则。
 public enum MenuBarSelection {
-    /// 由 config.toml `default_model` 前缀推导；推导不出（缺配置 / 未匹配 / 休眠 provider）回退 `DeepSeek`。
+    /// 由 config.toml `default_model` 前缀推导；推导不出（缺配置 / 未匹配）回退 `DeepSeek`。
     public static func deriveDefault(fromDefaultModel model: String?) -> ProviderID {
         let pid = ProviderID.fromDefaultModel(model)
         return pid == .unknown ? .deepseek : pid
@@ -90,7 +88,7 @@ public struct BalanceResult: Equatable, Sendable {
     /// 已用百分比（0-100，服务端原样，展示层不换算）。
     public let usedPercent: Double?
     public let resetRemaining: TimeInterval?
-    /// 额度窗口：休眠的 OpenCode Go 三窗口（5h / 7d / 月度）；生效的金额型 provider
+    /// 额度窗口：`OpenCode Go` 的三窗口（5h / 7d / 月度）；金额型 provider
     /// （DeepSeek / Kimi）为 nil。
     public let quotaWindows: [QuotaWindow]?
     /// 「当前是否可用」：DeepSeek 取响应里的 `is_available`；Kimi 取 `available_balance > 0`
@@ -116,9 +114,9 @@ public struct BalanceResult: Equatable, Sendable {
     }
 }
 
-// MARK: - Quota Window (休眠的 OpenCode Go)
+// MARK: - Quota Window（OpenCode Go）
 
-/// 一个额度窗口：休眠的 OpenCode Go 的 5h 滚动 / 7d / 月度（订阅周年重置）。
+/// 一个额度窗口：`OpenCode Go` 的 5h 滚动 / 7d / 月度（订阅周年重置）。
 public struct QuotaWindow: Equatable, Sendable {
     /// 窗口标识：`"5h"` | `"7d"` | `"monthly"`。
     public let id: String

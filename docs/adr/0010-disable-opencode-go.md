@@ -36,3 +36,14 @@
 - 休眠代码与协议存在漂移风险：`BalanceProvider` 协议或 `ProviderFailure` 分支变化时，编译器会通过穷尽 `switch` 提醒同步修改，但它不再有线上路径验证；重新启用前应先跑一遍 `SelfCheck`。
 - OpenCode Go 的三窗口配额 / 进度条能力仍然存在且被断言覆盖，未来出现其他 percent 型 provider 时可直接复用。
 - 若恢复订阅，把 `.opencodeGo` 加回 `supported` 即可，无需改配置、资源或测试。
+
+## Amendments
+
+### 2026-11-18 — 恢复启用
+
+用户重新订阅 OpenCode Go，本 ADR 的「默认停用」结论不再成立，但**实现与断言自始至终都保留着**，因此恢复没有新增代码：
+
+- `ProviderID.supported` 改回 `[.deepseek, .opencodeGo, .kimi]`，菜单顺序恢复为 DeepSeek → OpenCode Go → Kimi；抓取循环、菜单 section、「菜单栏显示」子菜单、`default_model` 前缀解析随之全部生效。
+- `SettingsStore` 不再把 `opencode-go` 当作脏值：存量的 `selectedProvider = "opencode-go"` 原样保留，其余未知 rawValue 仍走一次性自愈写回。
+- 停用期间唯一的语义变化是「休眠 provider 不渲染菜单 section」；`SelfCheck` 的菜单断言已改回三 section / 三 radio，并保留 `valueItems` 的 percent 映射断言。
+- 启停仍是一行源码（把 `.opencodeGo` 从 `supported` 摘掉 / 加回），不引入运行时开关。若后续再次停订，重复本节即可。

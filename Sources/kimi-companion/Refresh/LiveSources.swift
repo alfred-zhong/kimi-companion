@@ -36,8 +36,7 @@ public struct LiveBalanceSource: BalanceSource {
 
     /// 单个 provider 的采集：凭据来源判定 → 凭据检查 → fetch。
     ///
-    /// `capture` 只对 `ProviderID.supported` 调用；`internal` 供 `SelfCheck` 直接覆盖
-    /// 休眠的 OpenCode Go（ADR-0010），恢复 provider 时不需要重写这些断言。
+    /// `capture` 只对 `ProviderID.supported` 调用；`internal` 供 `SelfCheck` 直接覆盖单个 provider。
     func captureOne(_ pid: ProviderID, cfg: KimiConfig, creds: any CredentialSource) async -> ProviderCapture {
         guard let provider = BalanceRegistry.provider(for: pid, config: cfg) else {
             return ProviderCapture(failure: .providerMissing)

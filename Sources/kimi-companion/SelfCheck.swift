@@ -150,17 +150,15 @@ public enum SelfCheck {
         // `fromModelPrefix` 现在唯一的调用方是 `fromDefaultModel`（首启菜单栏 provider 推导）；
         // 用量已不再按 `model` 前缀归属（ADR-0006），这里覆盖的是推导路径本身。
         check("Provider.deepseek.verbatim", ProviderID.fromModelPrefix("DeepSeek") == .deepseek)
-        // 休眠的 OpenCode Go 不再参与前缀匹配（ADR-0010），但 case 本身仍可解析。
-        check("Provider.dormant.verbatimIsUnknown", ProviderID.fromModelPrefix("OpenCode Go") == .unknown)
-        check("Provider.dormant.rawValueIsUnknown", ProviderID.fromModelPrefix("opencode-go") == .unknown)
-        check("Provider.dormant.caseRetained", ProviderID(rawValue: "opencode-go") == .opencodeGo)
+        check("Provider.opencode.verbatim", ProviderID.fromModelPrefix("OpenCode Go") == .opencodeGo)
+        check("Provider.opencode.rawValue", ProviderID.fromModelPrefix("opencode-go") == .opencodeGo)
         check("Provider.kimi.verbatim", ProviderID.fromModelPrefix("Kimi") == .kimi)
         check("Provider.kimi.rawValue", ProviderID.fromModelPrefix("kimi") == .kimi)
         // `Moonshot` 是 Kimi 背后的开放平台名，但不是 config 段名也不是 rawValue → 不匹配任何 provider。
         check("Provider.kimi.moonshotIsUnknown", ProviderID.fromModelPrefix("Moonshot") == .unknown)
         check("Provider.unknown", ProviderID.fromModelPrefix("agent-loop") == .unknown)
         check("Provider.empty", ProviderID.fromModelPrefix("") == .unknown)
-        check("Provider.fromDefaultModel.dormantIsUnknown", ProviderID.fromDefaultModel("OpenCode Go/deepseek-v4.1-flash") == .unknown)
+        check("Provider.fromDefaultModel.opencode", ProviderID.fromDefaultModel("OpenCode Go/deepseek-v4.1-flash") == .opencodeGo)
         check("Provider.fromDefaultModel.deepseek", ProviderID.fromDefaultModel("DeepSeek/deepseek-flash") == .deepseek)
         check("Provider.fromDefaultModel.kimi", ProviderID.fromDefaultModel("Kimi/k3") == .kimi)
         check("Provider.fromDefaultModel.noSlash", ProviderID.fromDefaultModel("deepseek-flash") == .unknown)
@@ -170,15 +168,14 @@ public enum SelfCheck {
         check("Provider.kimi.rawValueLiteral", ProviderID.kimi.rawValue == "kimi")
         check("Provider.kimi.sectionName", ProviderID.kimi.configSectionName == "Kimi")
         check("Provider.kimi.displayName", ProviderID.kimi.displayName == "Kimi")
-        check("Provider.supportedOrder", ProviderID.supported == [.deepseek, .kimi])
+        check("Provider.supportedOrder", ProviderID.supported == [.deepseek, .opencodeGo, .kimi])
         check("Provider.supportedExcludesUnknown", !ProviderID.supported.contains(.unknown))
-        check("Provider.supportedExcludesDormant", !ProviderID.supported.contains(.opencodeGo))
         check("Provider.allCasesIncludesUnknown", ProviderID.allCases.contains(.unknown))
-        check("Provider.allCasesIncludesDormant", ProviderID.allCases.contains(.opencodeGo))
+        check("Provider.allCasesIncludesOpencodeGo", ProviderID.allCases.contains(.opencodeGo))
 
         // MARK: - MenuBarSelection（首启默认 provider）
 
-        check("Selection.dormantFallsBack", MenuBarSelection.deriveDefault(fromDefaultModel: "OpenCode Go/deepseek-v4.1-flash") == .deepseek)
+        check("Selection.opencode", MenuBarSelection.deriveDefault(fromDefaultModel: "OpenCode Go/deepseek-v4.1-flash") == .opencodeGo)
         check("Selection.deepseek", MenuBarSelection.deriveDefault(fromDefaultModel: "DeepSeek/deepseek-flash") == .deepseek)
         check("Selection.kimi", MenuBarSelection.deriveDefault(fromDefaultModel: "Kimi/k3") == .kimi)
         check("Selection.fallbackOnUnknown", MenuBarSelection.deriveDefault(fromDefaultModel: "zenmux/foo") == .deepseek)
@@ -477,10 +474,9 @@ public enum SelfCheck {
             check("Registry.deepseek.readsBaseURL",
                   (BalanceRegistry.provider(for: .deepseek, config: cfg) as? DeepSeekProvider)?.baseURL == nil)
             check("Registry.unknown.nil", BalanceRegistry.provider(for: .unknown, config: cfg) == nil)
-            check("Registry.all.count", BalanceRegistry.all(config: cfg).count == 2)
-            check("Registry.all.order", BalanceRegistry.all(config: cfg).map(\.id) == [.deepseek, .kimi])
-            // 休眠 provider 的路由仍保留（ADR-0010），恢复后不需要改 registry。
-            check("Registry.dormant.routeRetained",
+            check("Registry.all.count", BalanceRegistry.all(config: cfg).count == 3)
+            check("Registry.all.order", BalanceRegistry.all(config: cfg).map(\.id) == [.deepseek, .opencodeGo, .kimi])
+            check("Registry.opencode.route",
                   BalanceRegistry.provider(for: .opencodeGo, config: cfg)?.id == .opencodeGo)
         }
 
@@ -608,7 +604,7 @@ public enum SelfCheck {
             // 不存在的段。
             check("Config.missingSection", cfg.provider("MiniMax") == nil)
             // 「supported 每个都有 provider 段」这条守卫只对读 provider 段的 provider 成立
-            // （含休眠的 OpenCode Go：它仍按段名取凭据，恢复后不需要改配置）。
+            // （`Kimi` 例外，它的凭据来自 `[services.*]`）。
             check("Config.missingSectionGuard",
                   [ProviderID.deepseek, .opencodeGo].allSatisfy { cfg.provider($0.configSectionName) != nil })
             check("Config.kimiHasNoProviderSection", cfg.provider(ProviderID.kimi.configSectionName) == nil)
@@ -754,29 +750,19 @@ public enum SelfCheck {
 
             let source = LiveBalanceSource(config: KimiConfigSource(configPath: configPath), http: http)
 
-            // 休眠的 OpenCode Go 不在 `capture` 循环里（ADR-0010）；它的凭据判定 / 请求 /
-            // 解码由 `captureOne` 直接覆盖，恢复 provider 时这些断言原样复用。
-            func dormantCapture() -> ProviderCapture {
-                guard case .loaded(let cfg) = source.config.load() else {
-                    return ProviderCapture(failure: .configUnreadable("config.toml 不可读"))
-                }
-                return sync { await source.captureOne(.opencodeGo, cfg: cfg, creds: TomlCredentialSource(config: cfg)) }
-            }
-
+            // 三个 provider 都在 `capture` 循环里；凭据判定 / 请求 / 解码各走各的。
             let capture = sync { await source.capture(now: now) }
-            let dormant = dormantCapture()
             // `ProviderID.supported` 每个都有键：即使某个 provider 失败，事实也照记。
-            check("Source.perProvider.count", capture.perProvider.count == 2)
-            check("Source.perProvider.excludesDormant", !capture.perProvider.keys.contains(.opencodeGo))
+            check("Source.perProvider.count", capture.perProvider.count == 3)
+            check("Source.perProvider.includesOpencode", capture.perProvider.keys.contains(.opencodeGo))
             check("Source.deepseek.value", capture.capture(for: .deepseek).result?.balance == 65.92)
-            check("Source.dormant.value", dormant.result?.usedPercent == 16)
+            check("Source.opencode.value", capture.capture(for: .opencodeGo).result?.usedPercent == 16)
             check("Source.kimi.value", capture.capture(for: .kimi).result?.balance == 49.58894)
             check("Source.kimi.currency", capture.capture(for: .kimi).result?.currency == .cny)
             check("Source.kimi.noFailure", capture.capture(for: .kimi).failure == nil)
             check("Source.notConfigMissing", capture.configMissing == false)
             check("Source.defaultModel", capture.defaultModel == "OpenCode Go/deepseek-v4.1-flash")
-            // 生效 provider 各打自己的端点（DeepSeek 读 config 的 `base_url`，Kimi 写死国内站）；
-            // 休眠 provider 被直接调用时同样读 config 的 `base_url`。
+            // 生效 provider 各打自己的端点（DeepSeek / OpenCode Go 读 config 的 `base_url`，Kimi 写死国内站）。
             check("Source.usedConfigBaseURL", Set(http.urls) == [
                 "https://api.deepseek.com/user/balance",
                 "https://opencode.ai/zen/go/v1/usage",
@@ -803,7 +789,7 @@ public enum SelfCheck {
             http.statusByHost.removeAll()
             let missing = sync { await source.capture(now: now) }
             check("Source.sectionMissing.deepseekOK", missing.capture(for: .deepseek).result?.balance == 65.92)
-            check("Source.sectionMissing.opencode", dormantCapture().failure == .providerMissing)
+            check("Source.sectionMissing.opencode", missing.capture(for: .opencodeGo).failure == .providerMissing)
             check("Source.sectionMissing.kimi", missing.capture(for: .kimi).failure == .credentialSection(kimiNoSectionText))
 
             // 空 api_key。
@@ -817,7 +803,7 @@ public enum SelfCheck {
             try? Data(emptyKey.utf8).write(to: URL(fileURLWithPath: configPath))
             let empty = sync { await source.capture(now: now) }
             check("Source.emptyKey.deepseek", empty.capture(for: .deepseek).failure == .credentialEmpty)
-            check("Source.emptyKey.opencode", dormantCapture().failure == .credentialEmpty)
+            check("Source.emptyKey.opencode", empty.capture(for: .opencodeGo).failure == .credentialEmpty)
             check("Source.emptyKey.kimi", empty.capture(for: .kimi).failure == .credentialSection(kimiNoSectionText))
 
             // api_key_env：凭据不可解析，且明确与「空」区分。
@@ -831,7 +817,7 @@ public enum SelfCheck {
             try? Data(envKey.utf8).write(to: URL(fileURLWithPath: configPath))
             let envCapture = sync { await source.capture(now: now) }
             check("Source.envKey.deepseek", envCapture.capture(for: .deepseek).failure == .credentialEnv)
-            check("Source.envKey.opencodeOK", dormantCapture().result != nil)
+            check("Source.envKey.opencodeOK", envCapture.capture(for: .opencodeGo).result != nil)
             check("Source.envKey.kimi", envCapture.capture(for: .kimi).failure == .credentialSection(kimiNoSectionText))
 
             // Kimi 凭据段三种不可用形态：文案里的段名跟着首选段走，另两个 provider 不受牵连。
@@ -851,7 +837,7 @@ public enum SelfCheck {
                   kimiEmpty.capture(for: .kimi).failure == .credentialSection("services.moonshot_search 的 api_key 为空"))
             check("Source.kimi.emptyKey.doesNotDisturbOthers",
                   kimiEmpty.capture(for: .deepseek).result?.balance == 65.92
-                      && dormantCapture().result?.usedPercent == 16)
+                      && kimiEmpty.capture(for: .opencodeGo).result?.usedPercent == 16)
 
             let kimiEnvOnly = """
             [providers.DeepSeek]
@@ -877,15 +863,15 @@ public enum SelfCheck {
             check("Source.kimi.fetchFallbackSucceeds", kimiOnly.capture(for: .kimi).result?.balance == 49.58894)
             check("Source.kimi.fetchFallbackOthersMissing",
                   kimiOnly.capture(for: .deepseek).failure == .providerMissing
-                      && dormantCapture().failure == .providerMissing)
+                      && kimiOnly.capture(for: .opencodeGo).failure == .providerMissing)
 
             // config.toml 不可读 → 全局降级，每个都带 configUnreadable。
             let missingConfig = LiveBalanceSource(config: KimiConfigSource(configPath: "\(root.path)/gone.toml"), http: http)
             let unreadable = sync { await missingConfig.capture(now: now) }
             check("Source.configMissing.flag", unreadable.configMissing == true)
             check("Source.configMissing.deepseek", unreadable.capture(for: .deepseek).failure?.statusBarTag == "配置")
-            check("Source.configMissing.dormantNotFetched",
-                  unreadable.perProvider[.opencodeGo] == nil)
+            check("Source.configMissing.opencode",
+                  unreadable.capture(for: .opencodeGo).failure?.statusBarTag == "配置")
             check("Source.configMissing.kimi", unreadable.capture(for: .kimi).failure?.statusBarTag == "配置")
             check("Source.configMissing.noHTTP", unreadable.capture(for: .deepseek).result == nil)
         }
@@ -1562,21 +1548,22 @@ public enum SelfCheck {
             let items = StatusBarPresenter.renderMenu(inputs, now: now)
             let titles = items.map(\.title)
 
-            // 两个生效 provider 永远都在，顺序固定（= `ProviderID.supported`），header 只有 provider 名（不追加模型名）。
+            // 三个 provider 永远都在，顺序固定（= `ProviderID.supported`），header 只有 provider 名（不追加模型名）。
             let providerHeaders = ProviderID.supported.map(\.displayName)
             check("Menu.order.deepseekFirst", titles.first == "DeepSeek")
-            check("Menu.order.twoProviderSections",
-                  titles.filter { providerHeaders.contains($0) } == ["DeepSeek", "Kimi"])
-            check("Menu.noDormantSection", !titles.contains("OpenCode Go"))
+            check("Menu.order.threeProviderSections",
+                  titles.filter { providerHeaders.contains($0) } == ["DeepSeek", "OpenCode Go", "Kimi"])
+            check("Menu.hasOpencodeSection", titles.contains("OpenCode Go"))
             check("Menu.hasKimi", titles.contains("Kimi"))
             check("Menu.headerOnlyProviderName",
-                  titles.firstIndex(of: "DeepSeek")! < titles.firstIndex(of: "Kimi")!)
+                  titles.firstIndex(of: "DeepSeek")! < titles.firstIndex(of: "OpenCode Go")!
+                      && titles.firstIndex(of: "OpenCode Go")! < titles.firstIndex(of: "Kimi")!)
             check("Menu.headerNoModel", !titles.contains { title in
                 providerHeaders.contains { title.hasPrefix("\($0) (") }
             })
             check("Menu.hasAllProvidersEvenIfNothingCaptured",
                   StatusBarPresenter.renderMenu(.init()).map(\.title).filter { providerHeaders.contains($0) }
-                  == ["DeepSeek", "Kimi"])
+                  == ["DeepSeek", "OpenCode Go", "Kimi"])
 
             // DeepSeek / Kimi 各一行余额（金额型），后者紧跟自己的 header；DeepSeek 行尾带峰谷说明。
             check("Menu.deepseek.balanceLine", titles.contains("余额 ¥65.92 · 低谷 · 半价 · 14:00 转高峰"))
@@ -1587,8 +1574,11 @@ public enum SelfCheck {
             } else {
                 check("Menu.kimi.sectionLocated", false)
             }
-            // 休眠的 OpenCode Go 不再产生菜单 section（ADR-0010）；三窗口进度条的映射
-            // 仍由 `valueItems` 直接覆盖，恢复 provider 时不需要重写这部分断言。
+            // OpenCode Go 的 section 实际渲染出三行进度条（与 `valueItems` 的映射保持一致）。
+            let ocSectionIdx = titles.firstIndex(of: "OpenCode Go") ?? 0
+            let sectionBars = items[ocSectionIdx...].prefix { $0.title != "Kimi" }.compactMap(\.usageBar)
+            check("Menu.opencode.sectionBars", sectionBars.count == 3)
+            check("Menu.opencode.sectionLabels", sectionBars.map(\.leftText) == ["5h", "7d", "月度"])
             let bars = StatusBarPresenter.valueItems(ocOK, pid: .opencodeGo, now: now).compactMap(\.usageBar)
             check("Menu.opencode.barCount", bars.count == 3)
             check("Menu.opencode.labels", bars.map(\.leftText) == ["5h", "7d", "月度"])
@@ -1709,6 +1699,7 @@ public enum SelfCheck {
                     selectedProvider: .kimi,
                     balances: [
                         .deepseek: ProviderBalanceState(provider: .deepseek, result: dsOK),
+                        .opencodeGo: ProviderBalanceState(provider: .opencodeGo, result: ocOK),
                         .kimi: ProviderBalanceState(provider: .kimi, failure: .credentialSection("services.moonshot_search 的 api_key 为空")),
                     ],
                     daily: daily
@@ -1749,18 +1740,19 @@ public enum SelfCheck {
                 return finish(&failures)
             }
             check("Menu.menuBarSelection.exists", true)
-            check("Menu.menuBarSelection.count", displaySub.count == 2)
-            check("Menu.menuBarSelection.titles", displaySub.map(\.title) == ["DeepSeek ✓", "Kimi"])
+            check("Menu.menuBarSelection.count", displaySub.count == 3)
+            check("Menu.menuBarSelection.titles", displaySub.map(\.title) == ["DeepSeek ✓", "OpenCode Go", "Kimi"])
             check("Menu.menuBarSelection.actions", displaySub.allSatisfy { $0.action == .selectProvider })
             check("Menu.menuBarSelection.represented",
-                  displaySub.map(\.representedProvider) == ["deepseek", "kimi"])
-            // 休眠 provider 永不出现在子菜单，也永远拿不到 ✓。
-            let dormantSelectedItems = StatusBarPresenter.renderMenu(.init(selectedProvider: .opencodeGo), now: now)
-            let dormantDisplaySub = dormantSelectedItems.first { $0.title == "菜单栏显示" }?.submenu
-            check("Menu.menuBarSelection.dormantNeverListed", dormantDisplaySub?.map(\.title) == ["DeepSeek", "Kimi"])
+                  displaySub.map(\.representedProvider) == ["deepseek", "opencode-go", "kimi"])
+            // 选中 OpenCode Go 时 ✓ 跟着走到它自己。
+            let ocSelectedItems = StatusBarPresenter.renderMenu(.init(selectedProvider: .opencodeGo), now: now)
+            let ocDisplaySub = ocSelectedItems.first { $0.title == "菜单栏显示" }?.submenu
+            check("Menu.menuBarSelection.checkMovesToOpencode",
+                  ocDisplaySub?.map(\.title) == ["DeepSeek", "OpenCode Go ✓", "Kimi"])
             let kimiSelectedItems = StatusBarPresenter.renderMenu(.init(selectedProvider: .kimi), now: now)
             let kimiDisplaySub = kimiSelectedItems.first { $0.title == "菜单栏显示" }?.submenu
-            check("Menu.menuBarSelection.checkMovesToKimi", kimiDisplaySub?.map(\.title) == ["DeepSeek", "Kimi ✓"])
+            check("Menu.menuBarSelection.checkMovesToKimi", kimiDisplaySub?.map(\.title) == ["DeepSeek", "OpenCode Go", "Kimi ✓"])
 
             // Caffeinate 子菜单 + 倒计时行 + 取消守护。
             let caffSub = items.first { $0.title == "阻止系统休眠" }?.submenu
@@ -2792,12 +2784,13 @@ public enum SelfCheck {
             check("Settings.cleanup.ranges",
                   SettingsStore.cleanupKeepCountRange == 0...20 && SettingsStore.cleanupRetentionDaysRange == 0...365)
 
-            // 存量菜单栏 provider 值：休眠 / 未知 → 一次性自愈写回，键从未存在时不写盘。
+            // 存量菜单栏 provider 值：未知 → 一次性自愈写回，键从未存在时不写盘；
+            // 已启用的 `opencode-go` 原样保留。
             defaults.set("opencode-go", forKey: SettingsStore.providerKey)
-            let healedDormant = SettingsStore(defaults: defaults, fallbackProvider: .kimi)
-            check("Settings.provider.dormantFallsBack", healedDormant.selectedProvider == .kimi)
-            check("Settings.provider.dormantHealsStored",
-                  defaults.string(forKey: SettingsStore.providerKey) == "kimi")
+            let keptOpencode = SettingsStore(defaults: defaults, fallbackProvider: .kimi)
+            check("Settings.provider.opencodeRestored", keptOpencode.selectedProvider == .opencodeGo)
+            check("Settings.provider.opencodeNotHealed",
+                  defaults.string(forKey: SettingsStore.providerKey) == "opencode-go")
 
             defaults.set("zenmux", forKey: SettingsStore.providerKey)
             let healedUnknown = SettingsStore(defaults: defaults, fallbackProvider: .deepseek)

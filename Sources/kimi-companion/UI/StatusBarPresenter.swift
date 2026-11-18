@@ -303,8 +303,8 @@ public enum StatusBarPresenter {
     /// ──────
     /// 退出
     /// ```
-    /// 休眠的 OpenCode Go 不产生 section / 子菜单项（ADR-0010）；它的三窗口进度条仍由
-    /// `valueItems` 渲染，供 `SelfCheck` 与将来恢复时使用。
+    /// 每个受支持 provider 都产生自己的 section，顺序 = `ProviderID.supported`；
+    /// 三窗口进度条也由同一个 `valueItems` 渲染。
     public static func renderMenu(_ inputs: Inputs, now: Date = Date()) -> [MenuItemSpec] {
         var items: [MenuItemSpec] = []
 

@@ -6,9 +6,11 @@ Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock �
 
 - 菜单栏右上角展示**选中 Provider** 的余额 / 配额，左侧带该 Provider 的品牌 logo：
   - DeepSeek → `¥65.92`（CNY 账户余额）
+  - OpenCode Go → `16%`（5h 滚动窗口已用百分比）
   - Kimi → `¥49.59`（开放平台可用余额，CNY）
-- 弹出菜单（每个 Provider 的 section 永远都在，顺序固定 DeepSeek → Kimi）：
+- 弹出菜单（每个 Provider 的 section 永远都在，顺序固定 DeepSeek → OpenCode Go → Kimi）：
   - `DeepSeek`：余额行
+  - `OpenCode Go`：5h / 7d / 月度三窗口进度条行（各自重置倒计时）
   - `Kimi`：余额行
   - `今日 · ↑输入 · ↓输出 · ⚡缓存读取 · 🎯hit%` / `近 5h · …`：**全部会话合并**的一份用量，不按 Provider 或模型区分
   - `菜单栏显示 ▸`：切换菜单栏展示的 Provider
@@ -51,9 +53,12 @@ Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock �
 | Provider | 展示内容 | 端点 |
 |---|---|---|
 | `DeepSeek` | 账户余额（CNY，形如 `¥65.92`） | `GET https://api.deepseek.com/user/balance` |
+| `OpenCode Go` | 5h / 7d / 月度窗口已用百分比 | `GET https://opencode.ai/zen/go/v1/usage` |
 | `Kimi` | 开放平台可用余额（CNY，形如 `¥49.59`） | `GET https://api.moonshot.cn/v1/users/me/balance` |
 
-两个都用 `Authorization: Bearer <api_key>`，超时 10 秒。`DeepSeek` 的 `base_url` 若在 `config.toml` 里配了则以它为准（去掉尾部 `/` 后拼接路径）；非 HTTPS 或不带 host 的值会被忽略并回退到上表的官方默认地址。**`Kimi` 不适用这条**：地址写死国内站 `api.moonshot.cn`，`base_url` 一律不读——响应里没有 currency 字段，币种由站点隐含（`api.moonshot.cn` = CNY，`api.moonshot.ai` = USD），本 app 只服务国内站。
+三个都用 `Authorization: Bearer <api_key>`，超时 10 秒。`DeepSeek` / `OpenCode Go` 的 `base_url` 若在 `config.toml` 里配了则以它为准（去掉尾部 `/` 后拼接路径）；非 HTTPS 或不带 host 的值会被忽略并回退到上表的官方默认地址。**`Kimi` 不适用这条**：地址写死国内站 `api.moonshot.cn`，`base_url` 一律不读——响应里没有 currency 字段，币种由站点隐含（`api.moonshot.cn` = CNY，`api.moonshot.ai` = USD），本 app 只服务国内站。
+
+`OpenCode Go` 的 `base_url` 允许按 **OpenAI 兼容地址**写（`https://opencode.ai/inference/go/openai/v1`，kimi-code 里常见）：配额接口挂在产品路径下，拼接 `/usage` 前会先摘掉 `openai` 段，实际请求 `…/inference/go/v1/usage`；直接拼会得到 404。老写法 `https://opencode.ai/zen/go/v1` 行为不变。
 
 `Kimi` 展示的 `data.available_balance` = 现金 + 代金券，就是「还能不能调用推理 API」的那个数：`≤ 0` 时该行会追加 ` ⚠`。`code != 0`、`status != true`、`data` 缺失或三个余额字段（`available_balance` / `voucher_balance` / `cash_balance`）任一不可解析都判为 `响应解析失败`，绝不展示凭空的 `¥0.00`。凭据来源见下「`Kimi` 的凭据例外」。
 
@@ -62,14 +67,18 @@ Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock �
 凭据**只读** kimi-code 自己的 `~/.kimi-code/config.toml`，取 `[providers.<段名>]` 段里的内联 `api_key`；本 app 没有自己的凭据存储，不写回该文件、不读 Keychain、不解析 `api_key_env`。唯一的例外是 `Kimi`（见下）。
 
 ```toml
-default_model = "DeepSeek/deepseek-flash"
+default_model = "OpenCode Go/deepseek-v4.1-flash"
 
 [providers.DeepSeek]
 base_url = "https://api.deepseek.com"
 api_key = "sk-..."
+
+[providers."OpenCode Go"]     # 段名含空格，TOML 里需要加引号
+base_url = "https://opencode.ai/zen/go/v1"
+api_key = "sk-..."
 ```
 
-- 段名逐字使用（`DeepSeek`），它同时是配置键与菜单 section 的标题。
+- 段名逐字使用（`DeepSeek`、`OpenCode Go`），它同时是配置键与菜单 section 的标题。
 - `api_key` 为空 / 全空白视为没有凭据；段里只写了 `api_key_env` 时视为凭据不可解析（菜单里会说明原因）——Finder 启动的 GUI app 不继承用户 shell 环境，读环境变量不可靠。
 - 该文件不存在、无权限或 TOML 非法时，菜单栏降级为 `?kimi`。
 
@@ -122,7 +131,7 @@ swift run kimi-companion --self-check
 
 ## 切换菜单栏展示的 Provider
 
-打开下拉菜单 →「菜单栏显示 ▸」→ 选中 `DeepSeek` 或 `Kimi`（当前项带 ✓）。
+打开下拉菜单 →「菜单栏显示 ▸」→ 选中 `DeepSeek`、`OpenCode Go` 或 `Kimi`（当前项带 ✓）。
 
 - 选择会持久化到 UserDefaults，重启后保持。
 - **首次运行**时按 `config.toml` 的 `default_model` 前缀推导一次初值（推导不出则用 `DeepSeek`）；此后只有你的显式选择能改变它。
@@ -156,5 +165,5 @@ swift run kimi-companion --self-check
 - `0007-session-cleanup-in-app.md` — 为什么在 app 内直接删文件系统做清理，以及保留策略为何是合取
 - `0008-kimi-balance-scope-and-currency.md` — `Kimi` 余额的范围与币种：为什么端点写死国内站、币种恒为 CNY，以及为什么凭据取自内置工具服务段而非 `[providers.*]`
 - `0009-empty-workspace-cleanup.md` — 为什么允许 Keep Count = 0，以及为什么 `workspaces.json` 从绝不触碰变成受控写入（空工作区注销）
-- `0010-disable-opencode-go.md` — 为什么默认停用 OpenCode Go（代码保留、不进菜单也不抓取），以及如何恢复
+- `0010-disable-opencode-go.md` — 为什么曾把 OpenCode Go 从 `supported` 摘掉（实现保留），以及恢复启用的方式
 - `0011-deepseek-pricing-period.md` — DeepSeek 峰谷计价的菜单栏 / 菜单标记

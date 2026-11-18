@@ -4,7 +4,7 @@
 
 macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 kimi-code desktop 所用第三方 provider 的余额 / 配额，加一份**合并的** token 用量与模型请求次数（不区分 provider / model）。每 30 / 60 / 120s 刷新（默认 60s）。抓取失败永不空白：菜单栏显示 `?kimi` / `⚠︎<短标签>`，菜单给出可照抄去改配置的中文说明。
 
-- **Provider**：当前生效两个 —— `DeepSeek`（账户余额 CNY，金额右侧带峰谷字形 ` 峰` / ` 谷`，ADR-0011）与 `Kimi`（Moonshot 开放平台可用余额 CNY，单行 `余额 ¥49.59`，`available_balance ≤ 0` 时该行追加 ` ⚠`）。`OpenCode Go`（5h / 7d / 月度三窗口配额）已默认停用但实现全部保留（ADR-0010）：不进菜单、不抓取、不参与 `default_model` 前缀匹配；恢复 = 把 `.opencodeGo` 加回 `ProviderID.supported`。
+- **Provider**：当前生效三个 —— `DeepSeek`（账户余额 CNY，金额右侧带峰谷字形 ` 峰` / ` 谷`，ADR-0011）、`OpenCode Go`（5h / 7d / 月度三窗口配额，已用百分比，ADR-0010 的 Amendments 恢复了启用）与 `Kimi`（Moonshot 开放平台可用余额 CNY，单行 `余额 ¥49.59`，`available_balance ≤ 0` 时该行追加 ` ⚠`）。
 - 有意不支持 first-party `managed:kimi-code` 账号（`api_key` 恒空、走 OAuth，本地 `oauth/usage` 端点只覆盖该账号）。
 
 ## 硬性不变量
@@ -68,7 +68,7 @@ make clean   # rm -rf build .build
 
 ### 错误处理
 - `HTTPError`：`timeout | unauthorized(status:) | rateLimited | server(status:) | invalidResponse | missingCredential`；非 2xx 在 `URLSessionHTTPClient` 里就分类。
-- 各 provider 的 `decode` 宁可 `throw .invalidResponse` 也不展示凭空的 `¥0.00`：DeepSeek 的 `balance_infos` 缺失 / 为空 / 不可解析 → 报错；休眠的 OpenCode Go 三窗口 all-or-nothing（实现与断言保留）；`Kimi` 的 `code != 0` / `status != true` / 三个余额字段（`available_balance` / `voucher_balance` / `cash_balance`）任一不可解析 → 报错（`jsonDouble` 兼容字符串与数字两种数值形状）。
+- 各 provider 的 `decode` 宁可 `throw .invalidResponse` 也不展示凭空的 `¥0.00`：DeepSeek 的 `balance_infos` 缺失 / 为空 / 不可解析 → 报错；OpenCode Go 三窗口 all-or-nothing；`Kimi` 的 `code != 0` / `status != true` / 三个余额字段（`available_balance` / `voucher_balance` / `cash_balance`）任一不可解析 → 报错（`jsonDouble` 兼容字符串与数字两种数值形状）。
 - 单 provider 失败被 `LiveBalanceSource.captureOne` 收敛成 `ProviderCapture(failure:)`，**不 throw 出 Source**：一个 provider 的失败绝不短路另一个。
 - `LiveBalanceSource.humanReadable(_:)` 把 `HTTPError` 映射成中文文案（`请求超时 (10 秒)` / `鉴权失败 (401)` / `请求过快 (429)` / `服务异常 (5xx)` / `响应解析失败` / `凭据缺失`），缺省回退 `localizedDescription`。
 - `ProviderFailure` 是类型化枚举而非裸字符串：菜单栏短标签（`⚠︎配置` / `⚠︎凭据`）与菜单长文案都由它纯函数派生。`.credentialSection(reason)` 目前只有 `Kimi` 走到（段不存在 / `api_key` 为空 / 只用 `api_key_env`），中文 reason 由 `KimiProvider.credentialPreflight` 拼好，短标签仍是 `⚠︎凭据`。
@@ -81,7 +81,7 @@ make clean   # rm -rf build .build
 
 ### 命名 / 模板
 - 值类型优先（`struct BalanceResult` / `TokenStats` / `HourBucket` / `DailyUsageSnapshot`），行为 / 纯函数走 `enum` 单例（`BalanceRegistry` / `SelfCheck` / `CompactFormatter` / `BalanceFormatter` / `HourlyAggregator` / `StatusBarPresenter` / `LogoCatalog` / `MenuBarSelection`）。
-- `ProviderID.supported`（`[.deepseek, .kimi]`，顺序即菜单 section 顺序）是「菜单里永远都在的 provider」的唯一来源；抓取循环、菜单 section、「菜单栏显示」子菜单、`default_model` 前缀解析都只读它，因此休眠 provider（`.opencodeGo`）不在这里就自动全面停用（ADR-0010，`allCases` 仍含它）。`allCases` 含 `.unknown`，只作 `default_model` 前缀未匹配的哨兵与 logo / 查表缺省分支。`Kimi` 的 `configSectionName`（`"Kimi"`）只承担展示名与前缀匹配，**不代表存在 `[providers.Kimi]` 段**（凭据走 `[services.*]`）。
+- `ProviderID.supported`（`[.deepseek, .opencodeGo, .kimi]`，顺序即菜单 section 顺序）是「菜单里永远都在的 provider」的唯一来源；抓取循环、菜单 section、「菜单栏显示」子菜单、`default_model` 前缀解析都只读它。`allCases` 含 `.unknown`，只作 `default_model` 前缀未匹配的哨兵与 logo / 查表缺省分支。`Kimi` 的 `configSectionName`（`"Kimi"`）只承担展示名与前缀匹配，**不代表存在 `[providers.Kimi]` 段**（凭据走 `[services.*]`）。
 
 ### 文案 / 标题
 - 错误文案集中在 `ProviderFailure.menuText(provider:)` + `LiveBalanceSource.humanReadable(_:)`，新增错误显示分支优先复用。
@@ -152,7 +152,7 @@ make clean   # rm -rf build .build
 - **SwiftUI 代码不得依赖宏展开的 API**（`@State` / `@StateObject` / `@Environment` / `@Bindable`）：macOS 27 SDK 起它们是外部宏，插件 `libSwiftUIMacros.dylib` 只随 Xcode 提供，CLT 下编译会以 `plugin for module 'SwiftUIMacros' not found` 失败。视图内可变状态一律用 `ObservableObject` + `@ObservedObject`。
 - 包管理 SwiftPM；唯一外部依赖 `TOMLKit`（`from: 0.6.0`）。不新增 Conan / CocoaPods / Carthage。
 - 签发只做本机 ad-hoc（`codesign --force --deep --sign -`），不做 Developer ID 公证。不新增 `LaunchAgent` plist，app 不自启。
-- provider 请求走 `URLSession.shared`，未配 `NSAppTransportSecurity` 例外；新增端点必须 HTTPS 且经 `normalizeBaseURL`（去尾斜杠 + 强制 https + 回退官方默认）。`Kimi` 的端点是写死的 https 国内站 `api.moonshot.cn`，不经 `normalizeBaseURL`。休眠的 `OpenCode Go` 的 `base_url` 可能是 **OpenAI 兼容地址**（末尾 `…/inference/go/openai/v1`，kimi-code 就是这个写法）：`/usage` 挂在 `…/inference/go/v1/usage`，拼路径前必须摘掉 `openai` 段（`OpenCodeGoProvider.usageBaseURL`），否则 404；恢复该 provider 时这条仍然适用。
+- provider 请求走 `URLSession.shared`，未配 `NSAppTransportSecurity` 例外；新增端点必须 HTTPS 且经 `normalizeBaseURL`（去尾斜杠 + 强制 https + 回退官方默认）。`Kimi` 的端点是写死的 https 国内站 `api.moonshot.cn`，不经 `normalizeBaseURL`。`OpenCode Go` 的 `base_url` 可能是 **OpenAI 兼容地址**（末尾 `…/inference/go/openai/v1`，kimi-code 就是这个写法）：`/usage` 挂在 `…/inference/go/v1/usage`，拼路径前必须摘掉 `openai` 段（`OpenCodeGoProvider.usageBaseURL`），否则 404。
 
 ## 测试
 

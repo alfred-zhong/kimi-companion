@@ -30,7 +30,7 @@
 
 ### 变更
 
-- 默认停用 `OpenCode Go`：不再抓取，也不再出现在菜单 section 与「菜单栏显示」子菜单；`default_model` 的 `OpenCode Go/` 前缀不再参与菜单栏初值推导（回退 `DeepSeek`）。provider 实现、解码器、logo、三窗口进度条与自检断言全部保留，恢复只需把 `.opencodeGo` 加回 `ProviderID.supported`（决策见 `docs/adr/0010-disable-opencode-go.md`）。存量 `selectedProvider = "opencode-go"` 会在启动时一次性回落并写回 UserDefaults。
+- 恢复 `OpenCode Go`：`.opencodeGo` 加回 `ProviderID.supported`（顺序 `DeepSeek → OpenCode Go → Kimi`），三窗口额度行（5h 滚动 / 7d / 月度）与各自的 `xxx 后重置` 倒计时回到菜单，`default_model` 的 `OpenCode Go/` 前缀重新参与菜单栏初值推导；存量 `selectedProvider = "opencode-go"` 原样保留，不再被当作脏值写回。实现、解码器、logo、进度条与自检断言一直保留，启停仍是一行（决策见 `docs/adr/0010-disable-opencode-go.md` 的 Amendments）。
 - 用量行的排版变了：请求次数插在最前面（`今日 · 请求N · ↑… · ↓… · ⚡… · 🎯…%`），四项 token 的相对顺序不变。
 - `UsageEvent` 新增 `requestCount` 字段（`llm.request` 行为 `1`、`usage.record` 行为 `0`）；`WireLineParser` 从「只认 `usage.record`」改为「认 `usage.record` + `llm.request`」，`model` / `modelAlias` / `provider` 一律不读的不变量不变。
 - 用量统计不再按 Provider 或 model 区分：下拉菜单里只剩**一份**合并的 `今日` / `近 5h`，位于全部 Provider section 之后、「菜单栏显示」之前。
