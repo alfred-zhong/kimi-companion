@@ -63,7 +63,7 @@ make clean   # rm -rf build .build
 
 ### 异步
 - 不引入 `DispatchQueue` / `actor`（`WireLogReader` 用 `NSLock`，`SleepGuard` 用 `@MainActor`）。fetch 用 `async/await`，回主线程 `await MainActor.run { … }`，Combine 桥接 `MainActor.assumeIsolated`。
-- tick 在 `Timer.scheduledTimer`（`RunLoop.main` + `.common`）上调度，每次 fire 包 `Task { @MainActor in await controller.tick() }`。`StatusBarController.init` 会 fire 首次 tick **加上** timer 首次 tick，不去重。
+- tick 在 `Timer.scheduledTimer`（`RunLoop.main` + `.common`）上调度，带 10% `tolerance`（允许 timer coalescing / App Nap 合并唤醒），每次 fire 包 `Task { @MainActor in await controller.tick() }`。`StatusBarController.init` 额外 fire 一次首次 tick；timer 首次 fire 在 interval 之后，不构成重复。
 - `WireLogReader.events(now:)` 是同步阻塞 I/O：调用方保证不在主线程直接调。
 
 ### 错误处理
@@ -130,7 +130,7 @@ make clean   # rm -rf build .build
 | `SleepGuard/*.swift` | `SleepGuard`（单会话 IOPMAssertion）/ `IOPMAssertionAdapter`（system + display 成对）/ `SessionExpiryTimer`（一次性到期）/ `CountdownTicker`（1Hz，只在菜单打开期间启停）/ `CountdownFormatter` |
 | `Cleanup/SessionCleanup.swift` | 扫描 + 执行清理（唯一破坏性能力，ADR-0007 / 0009）：session 目录 / 孤儿事件 / 索引 / 账本 + 空工作区注销与空 bucket / 空账本；纯 Foundation，`Sendable` 值类型上的 `async` 包装 |
 | `Cleanup/CleanupPresenter.swift` | 清理的全部用户可见文案（纯函数、无 AppKit）：`humanBytes` / `previewContent` / `noDeletionDiagnostic` / `workspaceListing` / `completionContent` |
-| `UI/StatusBarController.swift` | `NSStatusItem` + `NSMenu` + `Timer` + Combine sink；按下一个峰谷切换点挂一次性 `Timer` 只重绘标题（ADR-0011）；`cleanupSessions()` 编排「扫描 → 预览 → 执行 → 结果」，带 `cleanupInFlight` 重入闸 |
+| `UI/StatusBarController.swift` | `NSStatusItem` + `NSMenu` + `Timer`（10% tolerance）+ Combine sink；同一轮 run loop 的状态更新合并成一次渲染，title / chrome / logo / boundary `Timer` 值未变则不重设；按下一个峰谷切换点挂一次性 `Timer` 只重绘标题（ADR-0011）；`cleanupSessions()` 编排「扫描 → 预览 → 执行 → 结果」，带 `cleanupInFlight` 重入闸 |
 | `UI/StatusBarPresenter.swift` | 纯函数展示层：`renderTitle` / `renderChrome` / `renderMenu` + `orderedProviders(selected:)`（选中者置顶，ADR-0012）+ `MenuItemSpec` / `UsageBarSpec` |
 | `Balance/DeepSeekPricing.swift` | 峰谷纯函数（ADR-0011）：固定 `Asia/Shanghai`，工作日 `09:00–12:00` / `14:00–18:00` 为峰时，周末与节假日全天空闲；内置 2026 / 2027 放假日期表，表外年份返回 `.unknown`；含下一次切换点与文案（`高峰` / `低谷`、`峰` / `谷`） |
 | `UI/UsageBarMenuItemView.swift` | 自绘用量进度条菜单项（轨道 + 段色填充 + 重置倒计时） |

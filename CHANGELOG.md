@@ -40,6 +40,7 @@
 - `workspaces.json` 从「绝不触碰」改为**唯一受控写入的元数据文件**：只允许空工作区注销路径读写，遵守「有改动才写 + 写前备份 + 原子替换 + apply 前重新读取复审 + desktop 运行中跳过」；`workspace-trust/` 明确加入绝不触碰清单。
 - 工作区保留数的合法范围从 `1…20` 放宽到 `0…20`，`RetentionPolicy` 的下限从 `1` 改为 `0`；`0` 不再保留最新 1 个，但 30 分钟活跃保护与保留天数仍然生效。
 - 偏好窗口从 360×96 放大到 420×210，容纳清理策略两项参数与更长的说明文字。
+- 能耗优化：主刷新 `Timer` 增加 10% `tolerance`（30s 档 3s / 60s 档 6s / 120s 档 12s），允许系统把这次唤醒与其他后台活动合并（timer coalescing / App Nap），余额展示对几秒抖动无感知；同一次 tick 连续写入的多个 `@Published`（余额 / `configMissing` / 日用量 / 日用量错误）合并到同一 run loop 轮次的一次渲染，状态栏 title / chrome / logo 与峰谷 boundary `Timer` 都改成「值未变则不重设」，避免每分钟多次无谓的布局与 WindowServer 更新。
 
 ### Bug 修复
 

@@ -24,6 +24,14 @@ public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sen
     private let currentPolicy: () -> RetentionPolicy
     /// 峰谷切换点的精确唤醒（ADR-0011）：到点只重绘标题，不发网络请求。
     private var boundaryTimer: Timer?
+    /// 已排程的切换点；同一个切换点不重复建 Timer。
+    private var boundaryScheduledAt: Date?
+    /// 同一批 `@Published` 变更的合并门闩（主线程读写）。
+    private var refreshScheduled = false
+    /// 上一次真正写进 status button 的内容：相同则跳过赋值，避免无谓的布局 / WindowServer 更新。
+    private var lastTitle: NSAttributedString?
+    private var lastChrome: StatusBarPresenter.ChromeSpec?
+    private var lastLogoKey: String?
     /// 扫描 / 弹窗 / 删除期间的 in-flight 标志：再点菜单项不产生第二个弹窗。
     private var cleanupInFlight = false
     private var caffeinateHeaderItem: NSMenuItem?
@@ -80,27 +88,44 @@ public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sen
             guard let self else { return }
             Task { @MainActor in await self.controller.tick() }
         }
+        // 容忍 10% 抖动，让系统把这次唤醒与其他后台活动合并（timer coalescing / App Nap）。
+        // 余额展示对几秒延迟无感知，而精确唤醒会阻止系统合并。
+        t.tolerance = max(1, controller.intervalSeconds * 0.1)
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
 
     private func wireState() {
+        // 一次 tick 会顺序写多个 `@Published`（余额 / configMissing / 日用量 / 日用量错误），
+        // 逐个直接刷新等于同一次 tick 重建 4 次状态栏。这里把同一轮 run loop 内的变更合并成一次渲染。
         let bridge: () -> Void = { [weak self] in
             guard let self else { return }
-            MainActor.assumeIsolated { self.refreshAll() }
+            MainActor.assumeIsolated { self.scheduleRefresh() }
         }
         state.$configMissing.receive(on: RunLoop.main).sink { _ in bridge() }.store(in: &cancellables)
         state.$balances.receive(on: RunLoop.main).sink { _ in bridge() }.store(in: &cancellables)
         state.$daily.receive(on: RunLoop.main).sink { _ in bridge() }.store(in: &cancellables)
         state.$lastDailyError.receive(on: RunLoop.main).sink { _ in bridge() }.store(in: &cancellables)
         state.$caffeinateSession.receive(on: RunLoop.main).sink { _ in bridge() }.store(in: &cancellables)
+        // 用户显式切换菜单栏 provider 要即时生效，不走合并。
         state.$selectedProvider.receive(on: RunLoop.main).sink { [weak self] _ in
             guard let self else { return }
-            MainActor.assumeIsolated {
-                self.refreshAll()
-                self.refreshLogo()
-            }
+            MainActor.assumeIsolated { self.refreshAll() }
         }.store(in: &cancellables)
+    }
+
+    /// 把同一 run loop 轮次内的多次状态变更合并成一次渲染。
+    @MainActor
+    private func scheduleRefresh() {
+        guard !refreshScheduled else { return }
+        refreshScheduled = true
+        RunLoop.main.perform(inModes: [.common]) { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                self.refreshScheduled = false
+                self.refreshAll()
+            }
+        }
     }
 
     private func currentInputs() -> StatusBarPresenter.Inputs {
@@ -120,8 +145,18 @@ public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sen
     private func refreshAll() {
         let inputs = currentInputs()
         let now = Date()
-        statusItem.button?.attributedTitle = StatusBarPresenter.renderTitle(inputs, now: now)
-        applyChrome(StatusBarPresenter.renderChrome(inputs))
+        // 值没变就不碰 `NSStatusItem`：赋同一个 title / chrome / image 仍会让 AppKit 走一遍
+        // 布局与 WindowServer 更新，而余额在大多数 tick 里是恒定值。
+        let title = StatusBarPresenter.renderTitle(inputs, now: now)
+        if lastTitle != title {
+            statusItem.button?.attributedTitle = title
+            lastTitle = title
+        }
+        let chrome = StatusBarPresenter.renderChrome(inputs)
+        if lastChrome != chrome {
+            applyChrome(chrome)
+            lastChrome = chrome
+        }
         refreshLogo()
         scheduleBoundaryRefresh(now: now)
     }
@@ -131,21 +166,37 @@ public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sen
     /// 只重绘、不抓取：真正需要网络的那次仍由常规 tick 负责。
     @MainActor
     private func scheduleBoundaryRefresh(now: Date) {
-        boundaryTimer?.invalidate()
-        boundaryTimer = nil
         guard state.selectedProvider == .deepseek, !state.configMissing,
               let next = DeepSeekPricing.nextTransition(after: now)
-        else { return }
+        else {
+            cancelBoundaryRefresh()
+            return
+        }
+        // 同一个切换点只排一次：每次刷新都重建 Timer 只是在扰动 run loop。
+        if boundaryScheduledAt == next.date { return }
+        cancelBoundaryRefresh()
         let timer = Timer.scheduledTimer(
             withTimeInterval: max(next.date.timeIntervalSince(now), 0.5),
             repeats: false
         ) { [weak self] _ in
             guard let self else { return }
             // Timer 在主 run loop 上 fire，直接假定主线程隔离（与 `wireState` 的桥接同款）。
-            MainActor.assumeIsolated { self.refreshAll() }
+            MainActor.assumeIsolated {
+                self.boundaryTimer = nil
+                self.boundaryScheduledAt = nil
+                self.refreshAll()
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
         boundaryTimer = timer
+        boundaryScheduledAt = next.date
+    }
+
+    @MainActor
+    private func cancelBoundaryRefresh() {
+        boundaryTimer?.invalidate()
+        boundaryTimer = nil
+        boundaryScheduledAt = nil
     }
 
     /// 把选中 provider 的 logo 写到 status button。`LogoCatalog` 内部已打 template 标记；
@@ -157,6 +208,8 @@ public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sen
         let pid = state.selectedProvider
         let active = state.caffeinateSession != nil
         let cacheKey = "\(pid.rawValue)#\(active ? "active" : "idle")"
+        // 同一 key 对应的 image 永远相同，重复赋值只会让 button 重新布局。
+        guard lastLogoKey != cacheKey else { return }
         let image: NSImage?
         if let cached = logoCache[cacheKey] {
             image = cached
@@ -168,6 +221,7 @@ public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sen
         }
         statusItem.button?.image = image
         statusItem.button?.imagePosition = .imageLeft
+        lastLogoKey = cacheKey
     }
 
     /// 把 template image 重新绘制成「alpha mask + 纯白」版本，得到非 template 的白色 image。
