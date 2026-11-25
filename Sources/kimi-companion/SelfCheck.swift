@@ -181,6 +181,24 @@ public enum SelfCheck {
         check("Selection.fallbackOnUnknown", MenuBarSelection.deriveDefault(fromDefaultModel: "zenmux/foo") == .deepseek)
         check("Selection.fallbackOnNil", MenuBarSelection.deriveDefault(fromDefaultModel: nil) == .deepseek)
 
+        // 「自动」模式：解析成功 → provider；解析不出 → 失败原因（不兜底，ADR-0013）。
+        check("Selection.auto.opencode", MenuBarSelection.resolveAuto(fromDefaultModel: "OpenCode Go/deepseek-v4.1-flash") == .provider(.opencodeGo))
+        check("Selection.auto.deepseek", MenuBarSelection.resolveAuto(fromDefaultModel: "DeepSeek/deepseek-flash") == .provider(.deepseek))
+        check("Selection.auto.kimi", MenuBarSelection.resolveAuto(fromDefaultModel: "Kimi/k3") == .provider(.kimi))
+        check("Selection.auto.rawValue", MenuBarSelection.resolveAuto(fromDefaultModel: "opencode-go/x") == .provider(.opencodeGo))
+        check("Selection.auto.trimmed", MenuBarSelection.resolveAuto(fromDefaultModel: "  Kimi/k3  ") == .provider(.kimi))
+        check("Selection.auto.missingNil", MenuBarSelection.resolveAuto(fromDefaultModel: nil) == .failure(.missingDefaultModel))
+        check("Selection.auto.missingEmpty", MenuBarSelection.resolveAuto(fromDefaultModel: "   ") == .failure(.missingDefaultModel))
+        check("Selection.auto.noSlash", MenuBarSelection.resolveAuto(fromDefaultModel: "kimi-k2") == .failure(.unmatched("kimi-k2")))
+        check("Selection.auto.unmatched", MenuBarSelection.resolveAuto(fromDefaultModel: "zenmux/foo") == .failure(.unmatched("zenmux")))
+        // first-party 账号的默认模型有意不支持（ADR-0008），自动模式如实报未匹配。
+        check("Selection.auto.firstParty",
+              MenuBarSelection.resolveAuto(fromDefaultModel: "managed:kimi-code/kimi-k2") == .failure(.unmatched("managed:kimi-code")))
+        check("Selection.auto.suffix.missing",
+              MenuBarAutoFailure.missingDefaultModel.menuSuffix == " · 未设置 default_model")
+        check("Selection.auto.suffix.unmatched",
+              MenuBarAutoFailure.unmatched("zenmux").menuSuffix == " · 未匹配 \"zenmux\"")
+
         // MARK: - ProviderFailure 文案
 
         do {
@@ -1431,6 +1449,29 @@ public enum SelfCheck {
             check("Title.configMissing.dominant", StatusBarPresenter.renderTitle(cfgMissing).string == "\u{2009}\u{2009}?kimi")
             check("Title.configMissing.noCoffee", !StatusBarPresenter.renderTitle(cfgMissing).string.contains("\u{2615}"))
 
+            // 1b) 自动解析失败：没有可信来源 → `⚠︎模型`，不借任何 provider 的读数；configMissing 仍压过它。
+            let autoUnresolved = StatusBarPresenter.Inputs(
+                selectedProvider: .unknown,
+                balances: [.deepseek: dsState, .opencodeGo: ocState],
+                autoEnabled: true,
+                autoFailure: .unmatched("zenmux")
+            )
+            check("Title.auto.unresolved", StatusBarPresenter.renderTitle(autoUnresolved).string == "\u{2009}\u{2009}⚠︎模型")
+            check("Title.auto.doesNotBorrowOther",
+                  !StatusBarPresenter.renderTitle(autoUnresolved).string.contains("¥65.92")
+                      && !StatusBarPresenter.renderTitle(autoUnresolved).string.contains("16%"))
+            check("Title.auto.configMissingDominates",
+                  StatusBarPresenter.renderTitle(
+                      .init(configMissing: true, selectedProvider: .unknown,
+                            autoEnabled: true, autoFailure: .missingDefaultModel)
+                  ).string == "\u{2009}\u{2009}?kimi")
+            let autoSession = CaffeinateSession(bucket: .sixtyMinutes, startedAt: now, endAt: now.addingTimeInterval(3600))
+            check("Title.auto.noCoffee",
+                  StatusBarPresenter.renderTitle(
+                      .init(selectedProvider: .unknown, caffeinateSession: autoSession,
+                            autoEnabled: true, autoFailure: .unmatched("x"))
+                  ).string == "\u{2009}\u{2009}⚠︎模型")
+
             // 2) 选中 DeepSeek：CNY 2 位小数。
             let dsSelected = StatusBarPresenter.Inputs(selectedProvider: .deepseek, balances: [.deepseek: dsState, .opencodeGo: ocState])
             check("Title.deepseek", StatusBarPresenter.renderTitle(dsSelected, now: now).string == "\u{2009}\u{2009}¥65.92 谷")
@@ -1769,26 +1810,59 @@ public enum SelfCheck {
             check("Menu.stale.keepsValue", stale.contains("余额 ¥65.92 · 低谷 · 半价 · 14:00 转高峰"))
             check("Menu.stale.labelsOldValue", stale.contains("⚠ 旧值 · 请求超时 (10 秒)"))
 
-            // 「菜单栏显示 ▸」子菜单：每个受支持 provider 一个 radio 项，选中带 ✓。
+            // 「菜单栏显示 ▸」子菜单：第一项「自动」，之后每个受支持 provider 一个 radio 项，选中带 ✓。
             guard let displayIdx = items.firstIndex(where: { $0.title == "菜单栏显示" }),
                   let displaySub = items[displayIdx].submenu else {
                 check("Menu.menuBarSelection.exists", false)
                 return finish(&failures)
             }
             check("Menu.menuBarSelection.exists", true)
-            check("Menu.menuBarSelection.count", displaySub.count == 3)
-            check("Menu.menuBarSelection.titles", displaySub.map(\.title) == ["DeepSeek ✓", "OpenCode Go", "Kimi"])
-            check("Menu.menuBarSelection.actions", displaySub.allSatisfy { $0.action == .selectProvider })
+            check("Menu.menuBarSelection.count", displaySub.count == 4)
+            check("Menu.menuBarSelection.titles",
+                  displaySub.map(\.title) == ["自动（跟随默认模型）", "DeepSeek ✓", "OpenCode Go", "Kimi"])
+            check("Menu.menuBarSelection.actions",
+                  displaySub.first?.action == .selectAuto && displaySub.dropFirst().allSatisfy { $0.action == .selectProvider })
             check("Menu.menuBarSelection.represented",
-                  displaySub.map(\.representedProvider) == ["deepseek", "opencode-go", "kimi"])
+                  displaySub.map(\.representedProvider) == [nil, "deepseek", "opencode-go", "kimi"])
             // 选中 OpenCode Go 时 ✓ 跟着走到它自己。
             let ocSelectedItems = StatusBarPresenter.renderMenu(.init(selectedProvider: .opencodeGo), now: now)
             let ocDisplaySub = ocSelectedItems.first { $0.title == "菜单栏显示" }?.submenu
             check("Menu.menuBarSelection.checkMovesToOpencode",
-                  ocDisplaySub?.map(\.title) == ["DeepSeek", "OpenCode Go ✓", "Kimi"])
+                  ocDisplaySub?.map(\.title) == ["自动（跟随默认模型）", "DeepSeek", "OpenCode Go ✓", "Kimi"])
             let kimiSelectedItems = StatusBarPresenter.renderMenu(.init(selectedProvider: .kimi), now: now)
             let kimiDisplaySub = kimiSelectedItems.first { $0.title == "菜单栏显示" }?.submenu
-            check("Menu.menuBarSelection.checkMovesToKimi", kimiDisplaySub?.map(\.title) == ["DeepSeek", "OpenCode Go", "Kimi ✓"])
+            check("Menu.menuBarSelection.checkMovesToKimi",
+                  kimiDisplaySub?.map(\.title) == ["自动（跟随默认模型）", "DeepSeek", "OpenCode Go", "Kimi ✓"])
+
+            // 自动模式：只有「自动」带 ✓，三个 provider 都不带；解析失败时把原因拼进自动项。
+            let autoItems = StatusBarPresenter.renderMenu(
+                .init(selectedProvider: .opencodeGo, autoEnabled: true), now: now
+            )
+            let autoSub = autoItems.first { $0.title == "菜单栏显示" }?.submenu
+            check("Menu.menuBarSelection.autoChecked", autoSub?.first?.title == "自动（跟随默认模型） ✓")
+            check("Menu.menuBarSelection.autoNoProviderCheck",
+                  autoSub?.dropFirst().allSatisfy { !$0.title.hasSuffix(" ✓") } == true)
+            let autoFailureSub = StatusBarPresenter.renderMenu(
+                .init(selectedProvider: .unknown, autoEnabled: true, autoFailure: .unmatched("zenmux")), now: now
+            ).first { $0.title == "菜单栏显示" }?.submenu
+            check("Menu.menuBarSelection.autoFailureSuffix",
+                  autoFailureSub?.first?.title == "自动（跟随默认模型 · 未匹配 \"zenmux\"） ✓")
+            let autoMissingSub = StatusBarPresenter.renderMenu(
+                .init(selectedProvider: .unknown, autoEnabled: true, autoFailure: .missingDefaultModel), now: now
+            ).first { $0.title == "菜单栏显示" }?.submenu
+            check("Menu.menuBarSelection.autoMissingSuffix",
+                  autoMissingSub?.first?.title == "自动（跟随默认模型 · 未设置 default_model） ✓")
+            // 显式模式下即便残留 failure 也不显示（解析失败原因只属于自动模式）。
+            let explicitSub = StatusBarPresenter.renderMenu(
+                .init(selectedProvider: .deepseek, autoFailure: .unmatched("x")), now: now
+            ).first { $0.title == "菜单栏显示" }?.submenu
+            check("Menu.menuBarSelection.failureSuffixHiddenWhenExplicit",
+                  explicitSub?.first?.title == "自动（跟随默认模型）")
+            // 自动解析失败时 section 回落 `ProviderID.supported` 原序。
+            check("Menu.menuBarSelection.autoUnresolvedOrder",
+                  StatusBarPresenter.renderMenu(
+                      .init(selectedProvider: .unknown, autoEnabled: true, autoFailure: .missingDefaultModel), now: now
+                  ).map(\.title).filter { providerHeaders.contains($0) } == ["DeepSeek", "OpenCode Go", "Kimi"])
 
             // Caffeinate 子菜单 + 倒计时行 + 取消守护。
             let caffSub = items.first { $0.title == "阻止系统休眠" }?.submenu
@@ -1905,6 +1979,78 @@ public enum SelfCheck {
             let dailyCallsBefore = dailySource.callCount
             sync { await rc.refreshBalance() }
             check("Refresh.refreshBalance.doesNotTouchDaily", dailySource.callCount == dailyCallsBefore)
+        }
+
+        // MARK: - RefreshController：「自动」模式跟随 default_model（ADR-0013）
+
+        do {
+            let dsOK = BalanceResult(provider: .deepseek, balance: 65.92, currency: .cny, isAvailable: true)
+            let ocOK = BalanceResult(provider: .opencodeGo, balance: 16, currency: .percent, usedPercent: 16)
+            func capture(_ model: String?) -> BalanceCapture {
+                BalanceCapture(
+                    perProvider: [
+                        .deepseek: ProviderCapture(result: dsOK),
+                        .opencodeGo: ProviderCapture(result: ocOK),
+                        .kimi: ProviderCapture(failure: .credentialEmpty),
+                    ],
+                    configMissing: false, defaultModel: model, capturedAt: now
+                )
+            }
+            let source = FakeBalanceSource(next: capture("DeepSeek/x"))
+            let state = AppState()
+            let rc = RefreshController(balanceSource: source, dailySource: FakeDailyUsageSource(), state: state)
+
+            // 自动关闭：tick 不碰显式选择（既有不变量）。
+            sync { await rc.tick() }
+            check("Auto.off.keepsExplicit", state.selectedProvider == .deepseek && state.autoEnabled == false)
+
+            // 开启自动：立即按最近一次可读的 default_model 解析，不必等下一个 tick。
+            sync { await rc.enableAuto() }
+            check("Auto.enable.resolvesImmediately", state.selectedProvider == .deepseek && state.autoEnabled)
+            check("Auto.enable.noFailure", state.autoFailure == nil)
+
+            // default_model 变化 → 下一 tick 跟着换。
+            source.next = capture("OpenCode Go/x")
+            sync { await rc.tick() }
+            check("Auto.followsDefaultModel", state.selectedProvider == .opencodeGo)
+            check("Auto.failureCleared", state.autoFailure == nil)
+
+            // 解析出的 provider 抓取失败 → 留在它上面，不换源（ADR-0005）。
+            source.next = BalanceCapture(
+                perProvider: [
+                    .deepseek: ProviderCapture(result: dsOK),
+                    .opencodeGo: ProviderCapture(failure: .fetch("请求超时 (10 秒)")),
+                ],
+                configMissing: false, defaultModel: "OpenCode Go/x", capturedAt: now
+            )
+            sync { await rc.tick() }
+            check("Auto.fetchFailureNoSwitch", state.selectedProvider == .opencodeGo)
+            check("Auto.fetchFailureShowsFailure",
+                  state.balance(for: .opencodeGo).failure == .fetch("请求超时 (10 秒)"))
+
+            // 解析失败 → `.unknown` + 原因（菜单栏据此渲染 `⚠︎模型`）。
+            source.next = capture("zenmux/foo")
+            sync { await rc.tick() }
+            check("Auto.unmatchedProvider", state.selectedProvider == .unknown)
+            check("Auto.unmatchedFailure", state.autoFailure == .unmatched("zenmux"))
+
+            // 恢复：解析成功即清空失败原因并换回该 provider。
+            source.next = capture("Kimi/k3")
+            sync { await rc.tick() }
+            check("Auto.recovers", state.selectedProvider == .kimi && state.autoFailure == nil)
+
+            // configMissing 的 tick 不改解析结果（此刻菜单栏由 `?kimi` 分支渲染）。
+            source.next = .allFailed(.configUnreadable("未找到 /x/config.toml"), now: now)
+            sync { await rc.tick() }
+            check("Auto.configMissingKeepsSelection", state.selectedProvider == .kimi)
+            check("Auto.configMissingKeepsFailureNil", state.autoFailure == nil)
+
+            // 显式选择即退出自动，后续 tick 不再改写。
+            sync { await rc.selectProvider(.deepseek) }
+            check("Auto.explicitTurnsOff", state.autoEnabled == false)
+            source.next = capture("Kimi/k3")
+            sync { await rc.tick() }
+            check("Auto.explicitStays", state.selectedProvider == .deepseek)
         }
 
         // MARK: - SleepGuard（FakeIOPMAssertionAdapter + RecordingSessionExpiryTimer）
@@ -2842,6 +2988,19 @@ public enum SelfCheck {
             _ = SettingsStore(defaults: defaults)
             check("Settings.provider.noWriteWhenAbsent",
                   defaults.object(forKey: SettingsStore.providerKey) == nil)
+
+            // 「自动」开关：默认关闭、键不存在时不写盘、持久化可恢复（ADR-0013）。
+            defaults.removeObject(forKey: SettingsStore.autoKey)
+            let fresh = SettingsStore(defaults: defaults)
+            check("Settings.auto.defaultOff", fresh.autoEnabled == false)
+            check("Settings.auto.noWriteOnInit", defaults.object(forKey: SettingsStore.autoKey) == nil)
+            fresh.autoEnabled = true
+            check("Settings.auto.persists", defaults.bool(forKey: SettingsStore.autoKey))
+            check("Settings.auto.restores", SettingsStore(defaults: defaults).autoEnabled)
+            fresh.autoEnabled = false
+            check("Settings.auto.persistsOff", defaults.bool(forKey: SettingsStore.autoKey) == false)
+            // 自动开关与显式选择正交：开关不改写 selectedProvider 键。
+            check("Settings.auto.keepsExplicitProvider", defaults.string(forKey: SettingsStore.providerKey) == nil)
         }
 
         // MARK: - LogoCatalog / 落地资源

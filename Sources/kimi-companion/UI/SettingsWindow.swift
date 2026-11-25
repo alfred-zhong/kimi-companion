@@ -5,6 +5,8 @@ import SwiftUI
 public final class SettingsStore: ObservableObject, @unchecked Sendable {
     static let intervalKey = "intervalSeconds"
     static let providerKey = "selectedProvider"
+    /// 「自动」模式开关（ADR-0013）；与 `selectedProvider` 正交：后者始终存最后一次显式选择。
+    static let autoKey = "menuBarAuto"
     static let cleanupKeepCountKey = "cleanupKeepCount"
     static let cleanupRetentionDaysKey = "cleanupRetentionDays"
 
@@ -20,8 +22,15 @@ public final class SettingsStore: ObservableObject, @unchecked Sendable {
     }
 
     /// 菜单栏展示哪个 provider 的值。用户在这里 / 菜单里显式选择，失败时不自动切换。
+    /// 「自动」模式下这里仍保留**最后一次显式选择**，菜单栏实际展示由 `default_model` 解析决定。
     @Published public var selectedProvider: ProviderID {
         didSet { defaults.set(selectedProvider.rawValue, forKey: Self.providerKey) }
+    }
+
+    /// 菜单栏是否跟随 config.toml 的 `default_model`（「菜单栏显示 ▸」里的「自动」，ADR-0013）。
+    /// 默认关闭；新装仍走「按 `default_model` 推导一次的显式选择」。
+    @Published public var autoEnabled: Bool {
+        didSet { defaults.set(autoEnabled, forKey: Self.autoKey) }
     }
 
     /// 每个工作区保留最近 N 个 session（清理用）。
@@ -56,6 +65,9 @@ public final class SettingsStore: ObservableObject, @unchecked Sendable {
             defaults.set(resolved.rawValue, forKey: Self.providerKey)
         }
         self.selectedProvider = resolved
+
+        // 键不存在时默认关闭自动，且不凭空写盘（与 provider 键同款纪律）。
+        self.autoEnabled = defaults.bool(forKey: Self.autoKey)
 
         // `integer(forKey:)` 对「从未设置」与「显式存 0」返回同一个 0，而 0 是保留天数的合法值
         // （不限天数）—— 因此必须区分「键不存在」与「值是 0」。

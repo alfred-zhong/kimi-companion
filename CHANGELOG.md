@@ -11,6 +11,7 @@
 - 下拉菜单按 Provider 分区（每个 section 永远都在；菜单栏显示的那个置顶，其余按 DeepSeek → OpenCode Go → Kimi 相对顺序）：DeepSeek / Kimi 段为余额行；OpenCode Go 段为三窗口进度条行（各自重置倒计时）。每个 section 里都**不再**带该 Provider 的用量行。
 - 用量只有**一份合并**的，位于全部 Provider section 之后、「菜单栏显示」之前：`今日 · ↑输入 · ↓输出 · ⚡缓存读取 · 🎯hit%` 与 `近 5h · …`；不按 Provider / model 区分，任何 `model` 前缀的记录（含不匹配任何 Provider 的）都计入同一份合计（决策见 `docs/adr/0006-combined-usage.md`）。
 - 「菜单栏显示 ▸」子菜单切换菜单栏展示的 Provider，选择持久化到 UserDefaults；首次运行由 `default_model` 前缀推导一次初值，此后用户选择优先，采集失败不自动切换（决策见 `docs/adr/0005-menubar-provider-is-explicit.md`）。
+- 「菜单栏显示 ▸」新增第一项「自动」：每个刷新周期按 `config.toml` 的 `default_model` 解析并展示对应 Provider，在 kimi-code 里换默认模型后菜单栏自动跟着换；解析不出（未设置 / 指向不支持的 Provider，含 first-party `managed:kimi-code`）时显示 `⚠︎模型`，菜单里给出未匹配的前缀，不做兜底；选任一 Provider 即退出自动（决策见 `docs/adr/0013-auto-menubar-provider.md`）。
 - 用量来源：`~/.kimi-code/sessions/<workspace>/<session>/agents/<agent>/wire.jsonl` 的 `usage.record` 行；只读 `time` 与 `usage` 四个计数，**不读 `model`**（全部记录合并统计）；12 个滑动小时桶 + 今日合并聚合，去重键为 `(相对路径, 行偏移)`。
 - wire 日志增量读取：进程内 Read Cursor（偏移 / 大小 / mtime / 文件身份 / 未成行尾部字节）+ mtime 预筛，每次只读追加字节，不落盘；保留窗口为 `min(当日零点, now − 12h)`（决策见 `docs/adr/0004-wire-log-read-cursor.md`）。
 - 移植「阻止系统休眠」守护：基于 IOPMAssertion 同时阻止系统与显示器空闲睡眠，30 / 60 / 120 分钟三档可重复覆盖启动，到期或取消自动释放，进程退出静默释放；守护期间菜单栏变咖啡色胶囊并在余额右侧追加 ` ☕`，倒计时只在菜单打开期间按秒走动，到期释放由一次性定时器触发而非轮询。

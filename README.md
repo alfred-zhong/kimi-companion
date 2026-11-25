@@ -8,18 +8,19 @@ Kimi Code 配套工具：macOS 菜单栏常驻 app（`LSUIElement`，无 Dock �
   - DeepSeek → `¥65.92`（CNY 账户余额）
   - OpenCode Go → `16%`（5h 滚动窗口已用百分比）
   - Kimi → `¥49.59`（开放平台可用余额，CNY）
+  - 自动 → 按 `config.toml` 的 `default_model` 解析出上述某个 Provider（解析不出显示 `⚠︎模型`）
 - 弹出菜单（每个 Provider 的 section 永远都在；菜单栏显示的那个置顶，其余按 DeepSeek → OpenCode Go → Kimi 相对顺序）：
   - `DeepSeek`：余额行
   - `OpenCode Go`：5h / 7d / 月度三窗口进度条行（各自重置倒计时）
   - `Kimi`：余额行
   - `今日 · ↑输入 · ↓输出 · ⚡缓存读取 · 🎯hit%` / `近 5h · …`：**全部会话合并**的一份用量，不按 Provider 或模型区分
-  - `菜单栏显示 ▸`：切换菜单栏展示的 Provider
+  - `菜单栏显示 ▸`：切换菜单栏展示的 Provider（含「自动」：跟随 `default_model`）
   - `阻止系统休眠 ▸`：30 / 60 / 120 分钟 + 倒计时行 + 取消守护
   - `偏好…` / `立即刷新`
   - `清理 session 文件…`：扫描 `~/.kimi-code` 并弹出预览，确认后删除过老的会话（见下）
   - `退出`
 - 自动定时刷新，默认 60s，可在偏好面板调为 30 / 60 / 120s；每次刷新实时查询 Provider 并**增量**读取会话日志，无磁盘缓存。
-- 错误降级永不空白：`config.toml` 不可读 / 非法时菜单栏显示 `?kimi`；单个 Provider 缺配置、缺凭据或请求失败时显示 `⚠︎配置` / `⚠︎凭据`，下拉菜单给出可照抄去改配置的中文说明。
+- 错误降级永不空白：`config.toml` 不可读 / 非法时菜单栏显示 `?kimi`；单个 Provider 缺配置、缺凭据或请求失败时显示 `⚠︎配置` / `⚠︎凭据`；「自动」解析不出 Provider 时显示 `⚠︎模型`。下拉菜单给出可照抄去改配置的中文说明。
 
 ## 清理 session 文件
 
@@ -127,15 +128,16 @@ open build/kimi-companion.app
 swift run kimi-companion --self-check
 ```
 
-输出 `[self-check] OK (全部通过)` 即表示全部断言通过（余额与配额的响应解码、格式化、用量合并口径与去重、增量读取契约、tick 状态机、菜单与状态栏渲染、休眠守护路径、清理策略与产物修剪）。**不做任何真实网络请求**，也不触碰真实 UI。
+输出 `[self-check] OK (全部通过)` 即表示全部断言通过（余额与配额的响应解码、格式化、用量合并口径与去重、增量读取契约、tick 状态机、自动模式解析与跟随、菜单与状态栏渲染、休眠守护路径、清理策略与产物修剪）。**不做任何真实网络请求**，也不触碰真实 UI。
 
 ## 切换菜单栏展示的 Provider
 
-打开下拉菜单 →「菜单栏显示 ▸」→ 选中 `DeepSeek`、`OpenCode Go` 或 `Kimi`（当前项带 ✓）。
+打开下拉菜单 →「菜单栏显示 ▸」→ 选中「自动」、`DeepSeek`、`OpenCode Go` 或 `Kimi`（当前项带 ✓）。
 
 - 选中的 Provider 的 section 会移到下拉菜单**最上面**（其余保持 DeepSeek → OpenCode Go → Kimi 的相对顺序），下次打开菜单即可看到。「菜单栏显示 ▸」子菜单本身仍按固定顺序排列，不跟着置顶（否则每次点完条目都会跳位）。
 - 选择会持久化到 UserDefaults，重启后保持。
-- **首次运行**时按 `config.toml` 的 `default_model` 前缀推导一次初值（推导不出则用 `DeepSeek`）；此后只有你的显式选择能改变它。
+- **首次运行**时按 `config.toml` 的 `default_model` 前缀推导一次初值（推导不出则用 `DeepSeek`）；此后由你的显式选择（或「自动」模式）决定。
+- 「自动」模式每个刷新周期按 `default_model` 重新解析，在 kimi-code 里换了默认模型后菜单栏会跟着换；解析不出（未设置、或指向本 app 不支持的 Provider，例如 first-party `managed:kimi-code`）时菜单栏显示 `⚠︎模型`，菜单里给出未匹配的前缀，**不会**退回某个 Provider 顶替。选任一 Provider 即退出自动。
 - 某个 Provider 抓取失败**不会**把菜单栏自动切到其他 Provider；菜单栏只会显示失败短标签，其他 Provider 的 section 仍然正常显示自己的数据。
 
 ## 已知限制
@@ -145,7 +147,7 @@ swift run kimi-companion --self-check
 - **`Kimi` 只支持国内站**：端点写死 `api.moonshot.cn`（币种 CNY 由站点隐含，响应里没有 currency 字段）。拿国际站（`api.moonshot.ai`）的 key 来查会得到一次响亮的 `鉴权失败 (401)`，而不是静默的错值。
 - **不做 Kimi Code 订阅额度**：菜单里的 `Kimi` 余额是**开放平台账户**的可用余额（现金 + 代金券），与 Kimi Code 会员 / 订阅额度是两套账；订阅配额走未公开的 `/coding/v1/usages` 端点，不在支持范围。Kimi Code 控制台 key（`sk-kimi-…`）与开放平台 key（`sk-…`）不是一套，只有后者能查余额。
 - **`Kimi` 凭据耦合内置工具段**：复用 `[services.moonshot_search]` / `[services.moonshot_fetch]` 的 `api_key`（见上「`Kimi` 的凭据例外」），改动或删除那把 key 会让余额降级为 `⚠︎凭据`。
-- **runtime 覆盖不可见**：菜单栏展示的是用户显式选定的 Provider，不跟随会话内的临时模型切换。
+- **runtime 覆盖不可见**：菜单栏展示的是用户显式选定的 Provider（或「自动」模式下 config 的默认模型对应的 Provider），不跟随会话内的临时模型切换。
 - **不做开机自启**：没有 LaunchAgent，也不写 `~/Library/LaunchAgents/*.plist`。
 - **仅本机 ad-hoc 签名**（`codesign --force --deep --sign -`），未做 Developer ID 公证，不适合分发。
 - **构建环境是 Command Line Tools only**：`xcodebuild` 不可用；SwiftUI 视图状态用 `ObservableObject` + `@ObservedObject`（`@State` 等宏展开的 property wrapper 在缺少 `libSwiftUIMacros.dylib` 的 CLT 环境下编不过）。

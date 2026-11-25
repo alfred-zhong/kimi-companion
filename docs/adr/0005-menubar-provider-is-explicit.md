@@ -36,3 +36,7 @@
 - 用户需要自己意识到「另一个 provider 的 section 里可能有更新的数据」；两个 section 永远都在菜单里，所以这个信息一直可见。
 - 不再需要「当前该显示谁」的状态机：`selectedProvider` 是唯一事实，没有任何采集结果路径会改写它。
 - 代价是菜单栏不再自动反映 kimi-code 侧默认模型的变化；用户在 kimi-code 里换了常用 provider 后，需要手动切一次。
+
+## Amendments
+
+- 2026-11-25（[0013](0013-auto-menubar-provider.md)）：新增用户显式开启的「自动」模式，每 tick 按 `default_model` 解析菜单栏展示的 provider。本文否决的是**无条件**持续跟随；自动模式下读数跳变是用户主动选择的结果，且抓取失败仍绝不换源，因此本文其余结论（默认显式选择、失败不自动切换、`selectedProvider` 不被采集结果改写）继续成立。

@@ -15,13 +15,18 @@ public enum StatusBarPresenter {
     /// 状态栏 / 菜单渲染所需的状态聚合。Controller 负责从 `AppState` 拉平后传入。
     public struct Inputs: Sendable {
         public let configMissing: Bool
-        /// 菜单栏展示哪个 provider 的值（用户显式选择）。
+        /// 菜单栏展示哪个 provider 的值：显式选择，或「自动」模式下解析出的 provider；
+        /// 自动解析失败时为 `.unknown`（渲染成 `⚠︎模型`）。
         public let selectedProvider: ProviderID
         /// provider → 余额状态；缺键按「尚未采集」处理。
         public let balances: [ProviderID: ProviderBalanceState]
         public let daily: DailyUsageSnapshot?
         public let lastDailyError: String?
         public let caffeinateSession: CaffeinateSession?
+        /// 菜单栏是否处于「自动」模式（ADR-0013）。
+        public let autoEnabled: Bool
+        /// 自动解析失败的原因；只在自动模式下参与子菜单文案。
+        public let autoFailure: MenuBarAutoFailure?
 
         public init(
             configMissing: Bool = false,
@@ -29,7 +34,9 @@ public enum StatusBarPresenter {
             balances: [ProviderID: ProviderBalanceState] = [:],
             daily: DailyUsageSnapshot? = nil,
             lastDailyError: String? = nil,
-            caffeinateSession: CaffeinateSession? = nil
+            caffeinateSession: CaffeinateSession? = nil,
+            autoEnabled: Bool = false,
+            autoFailure: MenuBarAutoFailure? = nil
         ) {
             self.configMissing = configMissing
             self.selectedProvider = selectedProvider
@@ -37,6 +44,8 @@ public enum StatusBarPresenter {
             self.daily = daily
             self.lastDailyError = lastDailyError
             self.caffeinateSession = caffeinateSession
+            self.autoEnabled = autoEnabled
+            self.autoFailure = autoFailure
         }
 
         /// 单个 provider 的状态（缺键 → 空态）。
@@ -81,6 +90,8 @@ public enum StatusBarPresenter {
             case cleanupSessions
             /// 「菜单栏显示 ▸」里选中某个 provider。
             case selectProvider
+            /// 「菜单栏显示 ▸」里选中「自动」（跟随 `default_model`，ADR-0013）。
+            case selectAuto
             case caffeinateBucket
             case caffeinateCancel
         }
@@ -173,13 +184,14 @@ public enum StatusBarPresenter {
     // MARK: - renderTitle
 
     /// 菜单栏标题优先级链：
-    /// `configMissing("?kimi") > 选中 provider 的余额 > 选中 provider 的失败(⚠︎<短标签>) > "···"`。
+    /// `configMissing("?kimi") > 自动解析失败(⚠︎模型) > 选中 provider 的余额 > 选中 provider 的失败(⚠︎<短标签>) > "···"`。
     ///
     /// **只看选中 provider**：另一个 provider 的状态再糟也不影响菜单栏，网络抖动更不会把菜单栏
-    /// 自动切到另一个 provider。
+    /// 自动切到另一个 provider（ADR-0005）。「自动」解析失败时选中值是 `.unknown`（ADR-0013），
+    /// 此时没有任何可信来源，显示 `⚠︎模型` 而不是借某个 provider 的读数。
     ///
     /// 守护激活时只在余额右侧追加 ` ☕`（咖啡色），不改变 `logoTextGap` ——
-    /// 激活前后 logo 与数值的间距必须完全一致。
+    /// 激活前后 logo 与数值的间距必须完全一致。`?kimi` / `⚠︎模型` 两个「无 provider」分支不追加 ☕。
     ///
     /// 选中 DeepSeek 且余额有值时，金额右侧追加峰谷字形（` 峰` / ` 谷`，ADR-0011）：
     /// 恒定一个字形，跨越 09:00 / 18:00 时菜单栏宽度不抖。节假日表未覆盖的年份不追加字形。
@@ -189,6 +201,11 @@ public enum StatusBarPresenter {
         if inputs.configMissing {
             // 与 omp-companion 一致：配置缺失分支不追加 ☕（此时连 provider 都没得谈）。
             return NSAttributedString(string: "\(logoTextGap)?kimi")
+        }
+
+        if inputs.selectedProvider == .unknown {
+            // 「自动」解析失败：没有 provider 可展示，也不借用任何一家的读数 / logo。
+            return NSAttributedString(string: "\(logoTextGap)⚠︎模型")
         }
 
         let state = inputs.balance(for: inputs.selectedProvider)
@@ -296,7 +313,7 @@ public enum StatusBarPresenter {
     /// 今日 · 请求 … · ↑… · ↓… · ⚡… · 🎯…%
     /// 近 5h · 请求 … · …
     /// ──────
-    /// 菜单栏显示 ▸ (DeepSeek / OpenCode Go / Kimi，选中打 ✓，顺序固定)
+    /// 菜单栏显示 ▸ (自动 / DeepSeek / OpenCode Go / Kimi，选中打 ✓，顺序固定)
     /// ──────
     /// 阻止系统休眠 ▸ (30 / 60 / 120 分钟) + 倒计时行 + 取消守护
     /// ──────
@@ -307,7 +324,8 @@ public enum StatusBarPresenter {
     /// 退出
     /// ```
     /// provider section 的顺序见 `orderedProviders(selected:)`；「菜单栏显示」子菜单刻意保持
-    /// `ProviderID.supported` 固定顺序（置顶的选择器会让条目在每次点击后跳位）。
+    /// 固定顺序（置顶的选择器会让条目在每次点击后跳位）。自动解析失败时选中值是 `.unknown`，
+    /// 此时 section 回落到 `ProviderID.supported` 原序（ADR-0013）。
     /// 三窗口进度条也由同一个 `valueItems` 渲染。
     public static func renderMenu(_ inputs: Inputs, now: Date = Date()) -> [MenuItemSpec] {
         var items: [MenuItemSpec] = []
@@ -326,10 +344,17 @@ public enum StatusBarPresenter {
 
         items.append(.separator)
 
-        // 子菜单刻意保持 `ProviderID.supported` 固定顺序：置顶的选择器会让条目在每次点击后跳位。
-        let sub = ProviderID.supported.map { pid in
+        // 子菜单固定顺序（自动 + `ProviderID.supported`）：置顶的选择器会让条目在每次点击后跳位。
+        // 自动模式下只有「自动」带 ✓，三个 provider 都不带 —— 两个 ✓ 会互相稀释。
+        // 解析失败时把原因拼在自动项里（`· 未匹配 "zenmux"` / `· 未设置 default_model`）。
+        let autoSuffix = inputs.autoEnabled ? (inputs.autoFailure?.menuSuffix ?? "") : ""
+        var sub = [MenuItemSpec(
+            title: "自动（跟随默认模型\(autoSuffix)）\(inputs.autoEnabled ? " ✓" : "")",
+            action: .selectAuto
+        )]
+        sub += ProviderID.supported.map { pid in
             MenuItemSpec(
-                title: "\(pid.displayName)\(inputs.selectedProvider == pid ? " ✓" : "")",
+                title: "\(pid.displayName)\(!inputs.autoEnabled && inputs.selectedProvider == pid ? " ✓" : "")",
                 action: .selectProvider,
                 representedProvider: pid.rawValue
             )

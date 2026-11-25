@@ -36,3 +36,7 @@
 - 「顺序 = `ProviderID.supported`」这条旧约定作废：`supported` 现在只决定**其余** section 的相对顺序，以及子菜单 / 抓取循环 / `default_model` 前缀解析的顺序。启停 Provider 仍是改 `supported` 一行。
 - `SelfCheck` 的菜单顺序断言改为「选中者第一 + 其余相对顺序不变 + 逐个 Provider 各断言一次 + 未知选中值退化为原序」，`Menu.headerOnlyProviderName` 之类的局部顺序断言仍用 `supported` 原序（默认选中 `DeepSeek`）。
 - 手动烟测多一项：切换「菜单栏显示」后重新打开菜单，第一段应换成刚选的 Provider，且子菜单条目位置不动。
+
+## Amendments
+
+- 2026-11-25（[0013](0013-auto-menubar-provider.md)）：「菜单栏显示」新增第一项「自动」，子菜单固定顺序变为「自动 + `ProviderID.supported`」。自动模式下置顶对象是每 tick 解析出的 provider；解析失败时选中值为 `.unknown`，按本文既有的退化规则回落 `ProviderID.supported` 原序。

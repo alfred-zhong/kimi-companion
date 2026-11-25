@@ -19,6 +19,8 @@ public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sen
     private var cancellables: Set<AnyCancellable> = []
     private let onShowSettings: () -> Void
     private let onSelectProvider: (ProviderID) -> Void
+    /// 用户从「菜单栏显示 ▸」选中「自动」。
+    private let onSelectAuto: () -> Void
     private let cleanup: SessionCleanup
     /// 每次清理前现取一次策略（偏好面板随时可改，不在 init 时快照）。
     private let currentPolicy: () -> RetentionPolicy
@@ -45,6 +47,7 @@ public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sen
         sleepGuard: SleepGuard,
         onShowSettings: @escaping () -> Void,
         onSelectProvider: @escaping (ProviderID) -> Void = { _ in },
+        onSelectAuto: @escaping () -> Void = {},
         cleanup: SessionCleanup,
         currentPolicy: @escaping () -> RetentionPolicy,
         countdownTicker: CountdownTicker = TimerCountdownTicker()
@@ -54,6 +57,7 @@ public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sen
         self.sleepGuard = sleepGuard
         self.onShowSettings = onShowSettings
         self.onSelectProvider = onSelectProvider
+        self.onSelectAuto = onSelectAuto
         self.cleanup = cleanup
         self.currentPolicy = currentPolicy
         self.countdownTicker = countdownTicker
@@ -135,7 +139,9 @@ public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sen
             balances: state.balances,
             daily: state.daily,
             lastDailyError: state.lastDailyError,
-            caffeinateSession: state.caffeinateSession
+            caffeinateSession: state.caffeinateSession,
+            autoEnabled: state.autoEnabled,
+            autoFailure: state.autoFailure
         )
     }
 
@@ -345,6 +351,7 @@ public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sen
         case .showSettings: return #selector(showSettings)
         case .cleanupSessions: return #selector(cleanupSessions)
         case .selectProvider: return #selector(selectProvider(_:))
+        case .selectAuto: return #selector(selectAuto)
         case .caffeinateBucket: return #selector(caffeinateBucket(_:))
         case .caffeinateCancel: return #selector(caffeinateCancel)
         case nil: return nil
@@ -434,6 +441,13 @@ public final class StatusBarController: NSObject, NSMenuDelegate, @unchecked Sen
         else { return }
         MainActor.assumeIsolated {
             onSelectProvider(pid)
+        }
+    }
+
+    /// 「菜单栏显示 ▸」里的「自动」：跟随 config.toml 的 `default_model`（ADR-0013）。
+    @objc private func selectAuto() {
+        MainActor.assumeIsolated {
+            onSelectAuto()
         }
     }
 

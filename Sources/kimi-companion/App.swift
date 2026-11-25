@@ -29,12 +29,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // kimi-code 数据根目录：app 里唯一的拼接点，清理器与会话日志读取都从它派生。
         let kimiCodeHome = SessionCleanup.dataHome(userHome: home)
 
-        // config.toml 是唯一凭据来源；只在启动时读一次用于推导菜单栏默认 provider。
+        // config.toml 是唯一凭据来源；启动时读一次：推导首启 provider + 给「自动」模式做首次解析。
         let configSource = KimiConfigSource(homeDir: home)
-        let fallbackProvider = MenuBarSelection.deriveDefault(fromDefaultModel: configSource.load().config?.defaultModel)
+        let initialConfig = configSource.load()
+        let fallbackProvider = MenuBarSelection.deriveDefault(fromDefaultModel: initialConfig.config?.defaultModel)
         let settings = SettingsStore(fallbackProvider: fallbackProvider)
         self.settingsStore = settings
         state.setSelectedProvider(settings.selectedProvider)
+        // 自动模式：只有真读到 config 才解析；读不到就等第一次 tick 落 `?kimi`，避免闪一下 `⚠︎模型`。
+        if case .loaded(let cfg) = initialConfig {
+            state.setAutoEnabled(settings.autoEnabled, defaultModel: cfg.defaultModel)
+        } else {
+            state.setAutoEnabled(settings.autoEnabled)
+        }
 
         let reader = WireLogReader(
             sessionsRoot: kimiCodeHome.appendingPathComponent("sessions", isDirectory: true).path
@@ -68,8 +75,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 settingsCtrl?.show(store: settings)
             },
             onSelectProvider: { [weak settings, weak controller] pid in
+                // 显式选择即退出「自动」（ADR-0013）。
+                settings?.autoEnabled = false
                 settings?.selectedProvider = pid
                 controller?.selectProvider(pid)
+            },
+            onSelectAuto: { [weak settings, weak controller] in
+                settings?.autoEnabled = true
+                controller?.enableAuto()
             },
             cleanup: SessionCleanup(kimiCodeHome: kimiCodeHome),
             // 清理策略每次点击时现取（偏好面板随时可改）。

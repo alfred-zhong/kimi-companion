@@ -13,8 +13,18 @@ public final class AppState: ObservableObject, @unchecked Sendable {
     @Published public private(set) var daily: DailyUsageSnapshot?
     @Published public private(set) var lastDailyError: String?
     @Published public private(set) var caffeinateSession: CaffeinateSession?
-    /// 菜单栏展示哪个 provider 的值。用户显式选择，**失败时不自动切换**。
+    /// 菜单栏展示哪个 provider 的值。显式选择，或「自动」模式下由 `default_model` 解析出的值；
+    /// 自动解析失败时为 `.unknown`（只存在于内存，永不落盘）。**失败时不自动切换**。
     @Published public private(set) var selectedProvider: ProviderID = .deepseek
+    /// 菜单栏是否跟随 config.toml 的 `default_model`（ADR-0013）。
+    @Published public private(set) var autoEnabled: Bool = false
+    /// 自动解析失败的原因；解析成功或关闭自动时为 nil。
+    @Published public private(set) var autoFailure: MenuBarAutoFailure?
+
+    /// 最近一次**可读** config 的 `default_model`（configMissing 的 tick 不覆盖它）；
+    /// 用户点「自动」时据此立即解析，不必等下一个 tick。
+    private var lastDefaultModel: String?
+    private var sawDefaultModel = false
 
     public init() {}
 
@@ -22,12 +32,48 @@ public final class AppState: ObservableObject, @unchecked Sendable {
     public func applyBalance(_ outcome: BalanceRefreshOutcome) {
         self.balances = outcome.balances
         self.configMissing = outcome.configMissing
+        // config 读不到时「default_model 是什么」没有新事实：保留上一次的解析结果与展示值，
+        // 菜单栏由 `configMissing` 分支渲染 `?kimi`。
+        guard !outcome.configMissing else { return }
+        lastDefaultModel = outcome.defaultModel
+        sawDefaultModel = true
+        if autoEnabled { applyAutoResolution(defaultModel: outcome.defaultModel) }
     }
 
     public func setDaily(_ snap: DailyUsageSnapshot?) { self.daily = snap }
     public func setDailyError(_ msg: String?) { self.lastDailyError = msg }
     public func setCaffeinateSession(_ s: CaffeinateSession?) { self.caffeinateSession = s }
     public func setSelectedProvider(_ p: ProviderID) { self.selectedProvider = p }
+
+    /// 开关「自动」。开启时用最近一次可读 config 的 `default_model` 立即解析一次；
+    /// `defaultModel` 非 nil 时顺带把它作为种子（启动路径用）。从未读到过 config 时保持当前展示值，
+    /// 等下一次 tick 落地（此刻菜单栏显示 `?kimi`）。
+    public func setAutoEnabled(_ enabled: Bool, defaultModel: String? = nil) {
+        autoEnabled = enabled
+        guard enabled else {
+            autoFailure = nil
+            return
+        }
+        if let defaultModel {
+            lastDefaultModel = defaultModel
+            sawDefaultModel = true
+        }
+        guard sawDefaultModel else { return }
+        applyAutoResolution(defaultModel: lastDefaultModel)
+    }
+
+    /// 自动模式的唯一解析入口：成功 → 换成该 provider；失败 → `.unknown` + 失败原因。
+    /// 解析结果每 tick 重算，成功后立即清空失败原因。
+    private func applyAutoResolution(defaultModel: String?) {
+        switch MenuBarSelection.resolveAuto(fromDefaultModel: defaultModel) {
+        case .provider(let pid):
+            if autoFailure != nil { autoFailure = nil }
+            if selectedProvider != pid { selectedProvider = pid }
+        case .failure(let failure):
+            if autoFailure != failure { autoFailure = failure }
+            if selectedProvider != .unknown { selectedProvider = .unknown }
+        }
+    }
 
     /// 单个 provider 的状态；尚未采集过时返回空态（result / failure 皆 nil）。
     public func balance(for provider: ProviderID) -> ProviderBalanceState {
@@ -79,10 +125,17 @@ public final class RefreshController: @unchecked Sendable {
         }
     }
 
-    /// 用户从菜单显式选择菜单栏 provider。
+    /// 用户从菜单显式选择菜单栏 provider：同时退出「自动」（ADR-0013）。
     @MainActor
     public func selectProvider(_ provider: ProviderID) {
+        state.setAutoEnabled(false)
         state.setSelectedProvider(provider)
+    }
+
+    /// 用户从菜单选择「自动」：立即按最近一次可读的 `default_model` 解析。
+    @MainActor
+    public func enableAuto() {
+        state.setAutoEnabled(true)
     }
 
     /// 逐 provider 推进状态：一个 provider 的失败绝不触碰另一个，

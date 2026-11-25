@@ -62,12 +62,49 @@ public enum ProviderID: String, CaseIterable, Sendable {
     }
 }
 
-/// 首次运行时菜单栏 provider 的推导规则。
+/// 「自动」模式解析 `default_model` 失败的原因（ADR-0013）。
+public enum MenuBarAutoFailure: Equatable, Sendable {
+    /// config.toml 可读，但没有 `default_model`（或为空串）。
+    case missingDefaultModel
+    /// 无法匹配任何受支持 provider；关联值是 `default_model` 的前缀（值里没有 `/` 时为整串）。
+    case unmatched(String)
+
+    /// 拼在子菜单「自动（跟随默认模型」之后的说明（前导 ` · `）。
+    public var menuSuffix: String {
+        switch self {
+        case .missingDefaultModel: return " · 未设置 default_model"
+        case .unmatched(let raw): return " · 未匹配 \"\(raw)\""
+        }
+    }
+}
+
+/// 「自动」模式对一次 `default_model` 的解析结果：要么落到一个受支持 provider，要么说明原因。
+public enum MenuBarAutoResolution: Equatable, Sendable {
+    case provider(ProviderID)
+    case failure(MenuBarAutoFailure)
+}
+
+/// 菜单栏 provider 的推导 / 解析规则。
 public enum MenuBarSelection {
-    /// 由 config.toml `default_model` 前缀推导；推导不出（缺配置 / 未匹配）回退 `DeepSeek`。
+    /// 首次运行时由 config.toml `default_model` 前缀推导；推导不出（缺配置 / 未匹配）回退 `DeepSeek`。
+    /// 只服务首启初值，运行期的「自动」模式走 `resolveAuto`（ADR-0013）。
     public static func deriveDefault(fromDefaultModel model: String?) -> ProviderID {
         let pid = ProviderID.fromDefaultModel(model)
         return pid == .unknown ? .deepseek : pid
+    }
+
+    /// 「自动」模式：每 tick 由 `default_model` 解析当前应展示的 provider，**不做兜底**——
+    /// 解析不出时返回失败原因，由展示层给出 `⚠︎模型` 标记（ADR-0013）。
+    public static func resolveAuto(fromDefaultModel model: String?) -> MenuBarAutoResolution {
+        let trimmed = (model ?? "").trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return .failure(.missingDefaultModel) }
+        guard let slash = trimmed.firstIndex(of: "/") else { return .failure(.unmatched(trimmed)) }
+        let prefix = String(trimmed[..<slash]).trimmingCharacters(in: .whitespaces)
+        let pid = ProviderID.fromModelPrefix(prefix)
+        guard pid != .unknown else {
+            return .failure(.unmatched(prefix.isEmpty ? trimmed : prefix))
+        }
+        return .provider(pid)
     }
 }
 

@@ -1,8 +1,8 @@
 # kimi-companion — Agent 手册
 
-> 面向 AI 助手的仓库协作手册。补充人类规范；不重复常识。决策缘由见 `docs/adr/0001-0012`（0003 已被 0006 取代；0007 的两条被 0009 取代）。
+> 面向 AI 助手的仓库协作手册。补充人类规范；不重复常识。决策缘由见 `docs/adr/0001-0013`（0003 已被 0006 取代；0007 的两条被 0009 取代）。
 
-macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 kimi-code desktop 所用第三方 provider 的余额 / 配额，加一份**合并的** token 用量与模型请求次数（不区分 provider / model）。每 30 / 60 / 120s 刷新（默认 60s）。抓取失败永不空白：菜单栏显示 `?kimi` / `⚠︎<短标签>`，菜单给出可照抄去改配置的中文说明。
+macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 kimi-code desktop 所用第三方 provider 的余额 / 配额，加一份**合并的** token 用量与模型请求次数（不区分 provider / model）。每 30 / 60 / 120s 刷新（默认 60s）。抓取失败永不空白：菜单栏显示 `?kimi` / `⚠︎<短标签>` / `⚠︎模型`，菜单给出可照抄去改配置的中文说明。「菜单栏显示 ▸」除三个 provider 外还有「自动」：跟随 `default_model` 解析（ADR-0013）。
 
 - **Provider**：当前生效三个 —— `DeepSeek`（账户余额 CNY，金额右侧带峰谷字形 ` 峰` / ` 谷`，ADR-0011）、`OpenCode Go`（5h / 7d / 月度三窗口配额，已用百分比，ADR-0010 的 Amendments 恢复了启用）与 `Kimi`（Moonshot 开放平台可用余额 CNY，单行 `余额 ¥49.59`，`available_balance ≤ 0` 时该行追加 ` ⚠`）。
 - 有意不支持 first-party `managed:kimi-code` 账号（`api_key` 恒空、走 OAuth，本地 `oauth/usage` 端点只覆盖该账号）。
@@ -12,7 +12,7 @@ macOS 菜单栏常驻 app（LSUIElement，无 Dock 图标），展示 kimi-code 
 - **凭据**：只读 `~/.kimi-code/config.toml` 的内联 `api_key`（ADR-0002）。通用来源 `[providers.<段名>]`；`[services.moonshot_search]` / `[services.moonshot_fetch]` 是**只服务 `Kimi` 的例外**（ADR-0008），不得扩展成通用凭据通道。不写回该文件、不读 Keychain、不读 `api_key_env`（不 `getenv`）、不碰 kimi-code 本地 HTTP server（`server/instances/*.json`、`server.token`、`mcp.json`）。
 - **用量是合并的一份**（ADR-0006）：`usage.record`（token）与 `step.begin`（请求次数）无条件求和，不按 provider / model 分组，`model` / `modelAlias` / `provider` 字段完全不读。菜单里 provider section 只放余额 / 配额；用量块（`今日` / `近 5h`）独立成段，放在所有 section 之后。请求次数是**发起**口径（含被中断的尝试），因此大于或等于「拿到 usage 的调用数」。
 - **无磁盘缓存**：每 tick 实时查 provider + 增量读会话日志，Read Cursor 只在进程内（ADR-0004）。不写 `~/Library/Caches/<bundle-id>/`。运行期持久化只有 UserDefaults（刷新间隔 / 选中 provider / 清理策略）；清理动作的受控写盘是唯一例外（`workspaces.json` / `session_index.jsonl` / `file-history`，ADR-0007 / 0009）。
-- **菜单栏 provider 是显式选择**（ADR-0005）：`default_model` 推导只在首启用一次，此后用户选择优先，provider 失败绝不自动切换 `selectedProvider`。
+- **菜单栏 provider 是显式选择，或用户显式开启的「自动」**（ADR-0005、ADR-0013）：`default_model` 推导只在首启用一次；默认显式选择，此后用户选择优先；「自动」模式下每 tick 按 `default_model` 解析并写入 `selectedProvider`，解析失败置 `.unknown`（标题 `⚠︎模型`），**绝不因抓取失败 / 健康度切换 provider**。
 - **不 shell-out 任何上游 CLI**。新增 provider 只需枚举 case + `BalanceProvider.fetch`，外加在 `LiveBalanceSource.captureOne` 的穷尽 `switch` 里声明凭据来源（漏了会编译失败）。
 - `ProviderBalanceState.isStale` 是余额侧唯一的退化路径：失败但有旧值时保留旧值并标注。
 
@@ -74,18 +74,18 @@ make clean   # rm -rf build .build
 - `ProviderFailure` 是类型化枚举而非裸字符串：菜单栏短标签（`⚠︎配置` / `⚠︎凭据`）与菜单长文案都由它纯函数派生。`.credentialSection(reason)` 目前只有 `Kimi` 走到（段不存在 / `api_key` 为空 / 只用 `api_key_env`），中文 reason 由 `KimiProvider.credentialPreflight` 拼好，短标签仍是 `⚠︎凭据`。
 
 ### 状态 / DI
-- `AppState`（`final class : ObservableObject, @unchecked Sendable`）持 6 个 `@Published`：`configMissing` / `balances` / `daily` / `lastDailyError` / `caffeinateSession` / `selectedProvider`。所有修改必须经过 setter，setter 都在主线程被调用。
+- `AppState`（`final class : ObservableObject, @unchecked Sendable`）持 8 个 `@Published`：`configMissing` / `balances` / `daily` / `lastDailyError` / `caffeinateSession` / `selectedProvider` / `autoEnabled` / `autoFailure`。所有修改必须经过 setter，setter 都在主线程被调用。`selectedProvider` 在自动模式下是每 tick 解析出的值，解析失败时为 `.unknown`（只存在于内存）。
 - 余额是 **per-provider 字典** `[ProviderID: ProviderBalanceState]`，不是单个快照；逐 provider 的合并细节封在 `RefreshController.balanceOutcome(for:)`。
 - 倒计时不走 `AppState`：菜单侧 `CountdownTicker` 按秒 in-place 改 `NSMenuItem.title`，`SleepGuard` 只用一次性到期定时器。
 - 所有跨任务类型 `Sendable`；跨线程持有者用 `@unchecked Sendable` + 命名 setter。
 
 ### 命名 / 模板
 - 值类型优先（`struct BalanceResult` / `TokenStats` / `HourBucket` / `DailyUsageSnapshot`），行为 / 纯函数走 `enum` 单例（`BalanceRegistry` / `SelfCheck` / `CompactFormatter` / `BalanceFormatter` / `HourlyAggregator` / `StatusBarPresenter` / `LogoCatalog` / `MenuBarSelection`）。
-- `ProviderID.supported`（`[.deepseek, .opencodeGo, .kimi]`）是「菜单里永远都在的 provider」的唯一来源；抓取循环、「菜单栏显示」子菜单、`default_model` 前缀解析都只读它。它的顺序只是**其余** provider section 的相对顺序：菜单里选中者置顶（`StatusBarPresenter.orderedProviders(selected:)`，ADR-0012），子菜单刻意保持 `supported` 原序以免条目跳位。`allCases` 含 `.unknown`，只作 `default_model` 前缀未匹配的哨兵与 logo / 查表缺省分支。`Kimi` 的 `configSectionName`（`"Kimi"`）只承担展示名与前缀匹配，**不代表存在 `[providers.Kimi]` 段**（凭据走 `[services.*]`）。
+- `ProviderID.supported`（`[.deepseek, .opencodeGo, .kimi]`）是「菜单里永远都在的 provider」的唯一来源；抓取循环、「菜单栏显示」子菜单、`default_model` 前缀解析都只读它。它的顺序只是**其余** provider section 的相对顺序：菜单里选中者置顶（`StatusBarPresenter.orderedProviders(selected:)`，ADR-0012），子菜单保持固定顺序（「自动」+ `supported` 原序）以免条目跳位。`allCases` 含 `.unknown`，作 `default_model` 前缀未匹配的哨兵、自动解析失败时 `selectedProvider` 的内存值、以及 logo / 查表缺省分支。`Kimi` 的 `configSectionName`（`"Kimi"`）只承担展示名与前缀匹配，**不代表存在 `[providers.Kimi]` 段**（凭据走 `[services.*]`）。
 
 ### 文案 / 标题
 - 错误文案集中在 `ProviderFailure.menuText(provider:)` + `LiveBalanceSource.humanReadable(_:)`，新增错误显示分支优先复用。
-- `renderTitle` 优先级：`configMissing("?kimi") > 选中 provider 的 result > 其 failure(⚠︎<短标签>) > "···"`，**只看选中 provider**。所有分支头部补两个 Thin Space（`\u{2009}\u{2009}`）拉开 logo 与文字间距；caffeinate 激活时余额右侧追加 ` ☕`（`\u{2615}`，咖啡色 `#8B5A2B`）。选中 DeepSeek 且余额有值时，金额与 ` ☕` 之间恒定追加峰谷字形 ` 峰` / ` 谷`（ADR-0011）：失败、`configMissing`、节假日表未覆盖的年份一律不挂；`renderTitle` / `renderMenu` 都接受 `now:` 参数（默认 `Date()`），`SelfCheck` 靠它把断言钉死在固定时刻。
+- `renderTitle` 优先级：`configMissing("?kimi") > 自动解析失败(⚠︎模型) > 选中 provider 的 result > 其 failure(⚠︎<短标签>) > "···"`，**只看选中 provider**。`?kimi` / `⚠︎模型` 两个「无 provider」分支不追加 ☕、也不显示 logo。所有分支头部补两个 Thin Space（`\u{2009}\u{2009}`）拉开 logo 与文字间距；caffeinate 激活时余额右侧追加 ` ☕`（`\u{2615}`，咖啡色 `#8B5A2B`）。选中 DeepSeek 且余额有值时，金额与 ` ☕` 之间恒定追加峰谷字形 ` 峰` / ` 谷`（ADR-0011）：失败、`configMissing`、节假日表未覆盖的年份一律不挂；`renderTitle` / `renderMenu` 都接受 `now:` 参数（默认 `Date()`），`SelfCheck` 靠它把断言钉死在固定时刻。
 - 时间：`formatHMS(_:)` → `HhMm`；`formatDuration(_:)` → `≥24h` 用 `XdYh`、否则 `HhMm`，全程无空格。
 - 用量行（`StatusBarPresenter.dailyLine`）：`今日 · 请求 N · ↑in · ↓out · ⚡cacheRead · 🎯hit%` 与 `近 5h · …`，两份都是**合并口径**；菜单里只有这两行，没有 per-provider 用量行，也没有「其他」行。请求次数走 `CompactFormatter`，与 token 同一进位数。
 - 本 app **不写日志文件**，也不 `print` 运行时信息（`SelfCheck` 的 `print` 是唯一输出）。
@@ -102,7 +102,7 @@ make clean   # rm -rf build .build
 1. `ProviderID` 加 `case`（`rawValue` 小写连字符，如 `opencode-go`）+ `configSectionName`（逐字段名）+ `displayName`。像 `Kimi` 一样没有 `[providers.*]` 段时，`configSectionName` 只承担展示名与前缀匹配。
 2. `Balance/Providers.swift` 加 `struct XxxProvider: BalanceProvider`，实现 `hasCredential(creds:)` + `fetch(creds:http:) async throws`。凭据经 `CredentialSource`（`TomlCredentialSource` 实现，只读 config.toml），默认读自己的 `[providers.<段名>]`。**provider 可以刻意偏离**（`Kimi` 读 `[services.*]`、端点写死，ADR-0008），但偏离必须（a）在 `captureOne` 的穷尽 `switch` 里显式声明凭据来源，（b）单独记一条 ADR。
 3. `BalanceRegistry.provider(for:config:)` 补路由（`base_url` 从 `config?.provider(id.configSectionName)?.baseURL` 取，经 `normalizeBaseURL` 去尾斜杠 + 强制 HTTPS；写死端点的 provider 不读 `base_url`）。
-4. 加入 `ProviderID.supported`（决定其余 section 的相对顺序与子菜单顺序；菜单里选中者置顶，ADR-0012）。
+4. 加入 `ProviderID.supported`（决定其余 section 的相对顺序与子菜单里 provider 的顺序；子菜单第一项固定是「自动」；菜单里选中者置顶，ADR-0012）。
 5. percent 型给 `quotaWindows`（`StatusBarPresenter.valueItems` 自动渲染成进度条行）；金额型给 `balance` + `currency`，`isAvailable == false` 时余额行自动追加 ` ⚠`。
 6. `LogoCatalog.assetBaseName(for:)` 补 logo 基名，并把 `Resources/<基名>@2x.png` / `@3x.png` 落地（`build.sh` 自动复制）。
 7. `SelfCheck` 补路由 / 解码 / URL / 凭据预检断言（`Kimi` 的解码与凭据预检三分支、config `[services.*]` 解析是现成模板）。
@@ -112,9 +112,9 @@ make clean   # rm -rf build .build
 | 文件 | 角色 |
 |---|---|
 | `App.swift` | `@main` 入口 + DI 装配 + `--self-check` 分派 + 最小主菜单（含「编辑」，偏好窗口才能 Cmd+V） |
-| `RefreshController.swift` | tick 编排 + `AppState`（`ObservableObject`，6 个 `@Published`） |
-| `SelfCheck.swift` | 进程级断言入口（`static run() -> Int`，847 个 `check(...)` 调用点） |
-| `Model/Models.swift` | 共享值类型：`ProviderID` / `MenuBarSelection` / `BalanceResult` / `QuotaWindow` / `ProviderFailure` / `ProviderCapture` / `ProviderBalanceState` / `TokenStats` / `HourBucket` / `DailyUsageSnapshot` / `CaffeinateBucket` / `CaffeinateSession` / `RefreshInterval` |
+| `RefreshController.swift` | tick 编排 + `AppState`（`ObservableObject`，8 个 `@Published`）+ 自动模式解析落位（`setAutoEnabled` / `enableAuto` / `selectProvider` 退出自动，ADR-0013） |
+| `SelfCheck.swift` | 进程级断言入口（`static run() -> Int`，899 个 `check(...)` 调用点） |
+| `Model/Models.swift` | 共享值类型：`ProviderID` / `MenuBarSelection`（含 `resolveAuto`）/ `MenuBarAutoResolution` / `MenuBarAutoFailure` / `BalanceResult` / `QuotaWindow` / `ProviderFailure` / `ProviderCapture` / `ProviderBalanceState` / `TokenStats` / `HourBucket` / `DailyUsageSnapshot` / `CaffeinateBucket` / `CaffeinateSession` / `RefreshInterval` |
 | `Balance/Providers.swift` | `BalanceProvider` 协议 + `DeepSeekProvider` + `OpenCodeGoProvider` + `KimiProvider` + `jsonDouble` + `BalanceRegistry` + `normalizeBaseURL` |
 | `Balance/CredentialSource.swift` | 凭据路径解析（`resolve(_ name:)`）：裸段名查 `[providers.*]`，`services.<段名>` 查 `[services.*]`（`Kimi` 专用） |
 | `Balance/HTTPClient.swift` | `HTTPClient` 协议 + `URLSessionHTTPClient`（仅 HTTPS）+ `HTTPError` |
@@ -131,17 +131,17 @@ make clean   # rm -rf build .build
 | `Cleanup/SessionCleanup.swift` | 扫描 + 执行清理（唯一破坏性能力，ADR-0007 / 0009）：session 目录 / 孤儿事件 / 索引 / 账本 + 空工作区注销与空 bucket / 空账本；纯 Foundation，`Sendable` 值类型上的 `async` 包装 |
 | `Cleanup/CleanupPresenter.swift` | 清理的全部用户可见文案（纯函数、无 AppKit）：`humanBytes` / `previewContent` / `noDeletionDiagnostic` / `workspaceListing` / `completionContent` |
 | `UI/StatusBarController.swift` | `NSStatusItem` + `NSMenu` + `Timer`（10% tolerance）+ Combine sink；同一轮 run loop 的状态更新合并成一次渲染，title / chrome / logo / boundary `Timer` 值未变则不重设；按下一个峰谷切换点挂一次性 `Timer` 只重绘标题（ADR-0011）；`cleanupSessions()` 编排「扫描 → 预览 → 执行 → 结果」，带 `cleanupInFlight` 重入闸 |
-| `UI/StatusBarPresenter.swift` | 纯函数展示层：`renderTitle` / `renderChrome` / `renderMenu` + `orderedProviders(selected:)`（选中者置顶，ADR-0012）+ `MenuItemSpec` / `UsageBarSpec` |
+| `UI/StatusBarPresenter.swift` | 纯函数展示层：`renderTitle` / `renderChrome` / `renderMenu` + `orderedProviders(selected:)`（选中者置顶，ADR-0012）+ 自动模式子菜单与 `⚠︎模型` 分支（ADR-0013）+ `MenuItemSpec` / `UsageBarSpec` |
 | `Balance/DeepSeekPricing.swift` | 峰谷纯函数（ADR-0011）：固定 `Asia/Shanghai`，工作日 `09:00–12:00` / `14:00–18:00` 为峰时，周末与节假日全天空闲；内置 2026 / 2027 放假日期表，表外年份返回 `.unknown`；含下一次切换点与文案（`高峰` / `低谷`、`峰` / `谷`） |
 | `UI/UsageBarMenuItemView.swift` | 自绘用量进度条菜单项（轨道 + 段色填充 + 重置倒计时） |
 | `UI/CleanupAlertPresenter.swift` | `NSAlert` 接线（预览 / 结果 / 固定 220pt 可滚动等宽详情区）；LSUIElement 下弹窗前自己抢焦点（`positionWindow` 先 `layout()` + `center()` 摆位，否则窗口停在 alert 默认 frame 的屏幕左上） |
-| `UI/SettingsWindow.swift` | `SettingsStore`（`@Published` × 镜像 UserDefaults）+ `NSHostingController<SettingsView>`（刷新间隔 + 清理策略两项 `Stepper`；Keep Count 范围 `0…20`，`0` 显示「不保留」） |
+| `UI/SettingsWindow.swift` | `SettingsStore`（`@Published` × 镜像 UserDefaults；`selectedProvider` = 最后一次显式选择，`menuBarAuto` = 自动开关，ADR-0013）+ `NSHostingController<SettingsView>`（刷新间隔 + 清理策略两项 `Stepper`；Keep Count 范围 `0…20`，`0` 显示「不保留」） |
 | `Brand/LogoCatalog.swift` | `ProviderID` → `NSImage` 查表 + template 标记；未知 provider 返回 nil |
-| `Resources/Info.plist` | **`LSUIElement=true`**、`CFBundleIdentifier=com.alfred-zhong.kimi-companion`、`CFBundleIconFile=AppIcon`、`LSMinimumSystemVersion=13.0`、版本 `0.7.0`（build `11`，与 `META` 同步） |
+| `Resources/Info.plist` | **`LSUIElement=true`**、`CFBundleIdentifier=com.alfred-zhong.kimi-companion`、`CFBundleIconFile=AppIcon`、`LSMinimumSystemVersion=13.0`、版本 `0.8.0`（build `12`，与 `META` 同步） |
 | `Resources/provider_*.png` | 菜单栏 logo（`@2x` / `@3x`，无 `.color.png` 兜底） |
 | `Resources/AppIcon.icns` | app 图标（`CFBundleIconFile` 指向；Finder / `NSAlert` 用）。由 `Tools/make-appicon.swift` 生成，勿手改 |
 | `Tools/make-appicon.swift` | 图标生成脚本（不在 SwiftPM target 里，`swift Tools/make-appicon.swift` 直接跑；改设计改这里再重新生成） |
-| `docs/adr/0001-0011-*.md` | 现行决策记录（见文首；0007 的两条被 0009 取代） |
+| `docs/adr/0001-0013-*.md` | 现行决策记录（见文首；0007 的两条被 0009 取代） |
 | `Package.swift` / `Package.resolved` / `Makefile` / `build.sh` | SwiftPM 入口（`swift-tools-version: 5.9`，macOS `.v13`，唯一外部依赖 `TOMLKit`）/ 锁定 TOMLKit 0.6.0（随仓库提交）/ 常用命令 / 构建 + 拼 `.app`（复制 `Resources/*.png` + `*.icns`）+ ad-hoc 签名 |
 
 ## 运行 / 工具链
@@ -159,8 +159,8 @@ make clean   # rm -rf build .build
 - 无 XCTest / Swift Testing：测试以 **`SelfCheck` 进程级断言**形式存在，由 `--self-check` 调用（`make test` 等价）。
 - 新增断言：在 `SelfCheck.run()` 内追加 `check("...", cond)`（纯函数 + `Bool` 条件）。不要引入 XCTest。
 - 退出码：0 = 全部通过（`[self-check] OK (全部通过)`）；1 = 任意失败（`[self-check] FAIL (N):` + 失败 label）。
-- 覆盖：各 provider 解码 / URL / 凭据预检（含 `Kimi` 三分支与 config `[services.*]` 解析）、`TokenStats`（含请求次数不参与 token 派生量）/ `CompactFormatter` / `BalanceFormatter` 边界、`DeepSeekPricing`（峰时窗口左闭右开 / 午间低谷 / 周末与调休上班日 / 节假日 / 表外年份 / 切换点跳过周末 / 字形与文案）、`HourlyAggregator` 桶边界与跨零点（含请求次数与 token 同轴）、`WireLineParser` / `WireLogReader` 增量契约（含两种事件行混排）、`RefreshController.tick` 编排（成功 / 失败 / 恢复 / stale / 配置缺失）、`StatusBarPresenter` 三渲染函数与菜单结构、`UsageBarMenuItemView` 段色与最小条宽、`SleepGuard` 到期与取消、`LogoCatalog` 资源、app 图标（icns 落地 / magic / `CFBundleIconFile` 同名 / 尺寸档位）、清理（合取四分支 / Keep Count 0 / `humanBytes` / 预览与完成文案 / `session_index.jsonl` 修剪 / 空工作区注销与复审 / alias tombstone / `workspaces.json` 备份与未知字段保留 / 损坏注册表跳过 / 临时目录端到端）。
-- 手动烟测：`open build/kimi-companion.app` 看菜单栏是否渲染出选中 provider 的余额 / `¥X.XX` / `X%` 与 logo；Finder 里 `build/kimi-companion.app` 是否显示自绘图标（不是通用图标）；「菜单栏显示」三个选项切换是否即时生效并带 ✓、重新打开菜单后选中的 Provider 是否排在第一段（子菜单条目位置不应跳动）；「立即刷新」是否即时重抓；偏好面板档位是否 ~1 个 tick 内生效（工作区保留数能减到「不保留」）；「阻止系统休眠」是否变咖啡色胶囊 + ` ☕`、倒计时是否只在菜单打开时走动；「清理 session 文件…」是否弹出预览、点「取消」是否什么都没删；预览里是否单独列出空工作区、确认后 `workspaces.json` 是否留下 `.bak-<时间戳>`、重启 Kimi Code 后空工作区是否从侧边栏消失。`Kimi` 凭据来自 `[services.moonshot_search]`：改掉 / 删掉那把 `api_key` 应看到 `⚠︎凭据` + 中文说明，而不是空白或 `¥0.00`。
+- 覆盖：各 provider 解码 / URL / 凭据预检（含 `Kimi` 三分支与 config `[services.*]` 解析）、`TokenStats`（含请求次数不参与 token 派生量）/ `CompactFormatter` / `BalanceFormatter` 边界、`MenuBarSelection`（首启推导 + `resolveAuto` 的三 provider / 小写 rawValue / 缺失 / 无 `/` / 未匹配前缀 / first-party）、自动模式（`⚠︎模型` 标题与 `?kimi` 优先级、子菜单 ✓ 语义与失败后缀、`.unknown` 回落原序、tick 跟随 / 抓取失败不换源 / configMissing 保持 / 显式选择退出、`menuBarAuto` 持久化）、`DeepSeekPricing`（峰时窗口左闭右开 / 午间低谷 / 周末与调休上班日 / 节假日 / 表外年份 / 切换点跳过周末 / 字形与文案）、`HourlyAggregator` 桶边界与跨零点（含请求次数与 token 同轴）、`WireLineParser` / `WireLogReader` 增量契约（含两种事件行混排）、`RefreshController.tick` 编排（成功 / 失败 / 恢复 / stale / 配置缺失）、`StatusBarPresenter` 三渲染函数与菜单结构、`UsageBarMenuItemView` 段色与最小条宽、`SleepGuard` 到期与取消、`LogoCatalog` 资源、app 图标（icns 落地 / magic / `CFBundleIconFile` 同名 / 尺寸档位）、清理（合取四分支 / Keep Count 0 / `humanBytes` / 预览与完成文案 / `session_index.jsonl` 修剪 / 空工作区注销与复审 / alias tombstone / `workspaces.json` 备份与未知字段保留 / 损坏注册表跳过 / 临时目录端到端）。
+- 手动烟测：`open build/kimi-companion.app` 看菜单栏是否渲染出选中 provider 的余额 / `¥X.XX` / `X%` 与 logo；Finder 里 `build/kimi-companion.app` 是否显示自绘图标（不是通用图标）；「菜单栏显示」四个选项切换是否即时生效并带 ✓、重新打开菜单后选中的 Provider 是否排在第一段（子菜单条目位置不应跳动）；选「自动」后菜单栏是否在一个 tick 内变成 `default_model` 对应的 provider，把它改成不支持的 provider（如 `zenmux/foo`）是否显示 `⚠︎模型` 且子菜单给出未匹配前缀，改回后是否自动恢复，自动模式下点任一 provider 是否退出自动；「立即刷新」是否即时重抓；偏好面板档位是否 ~1 个 tick 内生效（工作区保留数能减到「不保留」）；「阻止系统休眠」是否变咖啡色胶囊 + ` ☕`、倒计时是否只在菜单打开时走动；「清理 session 文件…」是否弹出预览、点「取消」是否什么都没删；预览里是否单独列出空工作区、确认后 `workspaces.json` 是否留下 `.bak-<时间戳>`、重启 Kimi Code 后空工作区是否从侧边栏消失。`Kimi` 凭据来自 `[services.moonshot_search]`：改掉 / 删掉那把 `api_key` 应看到 `⚠︎凭据` + 中文说明，而不是空白或 `¥0.00`。
 - **不要**靠 unit test 覆盖率衡量进度；当前靠 `SelfCheck` + 人工菜单栏检查。
 
 ## 提交前
